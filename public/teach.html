@@ -796,8 +796,46 @@ function distToSegment(p, a, b) {
   return ptDist(p, { x: a.x + t * dx, y: a.y + t * dy });
 }
 
-// --- Detectors ---
+// Turning angle at work[i] using a k-point window.
+// Uses atan2(|cross|, dot) — correct without normalisation.
+function turningAngle(work, i, k) {
+  if (i < k || i + k >= work.length) return 0;
+  const ax = work[i].x - work[i - k].x, ay = work[i].y - work[i - k].y;
+  const bx = work[i + k].x - work[i].x, by = work[i + k].y - work[i].y;
+  return Math.atan2(Math.abs(ax * by - ay * bx), ax * bx + ay * by);
+}
 
+// Find sharp corners (direction change > minAngleDeg) in a stroke.
+// For closed strokes extends by 30 % so the corner at the seam is detectable.
+// Returns { si, angle, pt }[] sorted by position.
+function findSharpCorners(pts, minAngleDeg = 60) {
+  const minAngle = minAngleDeg * Math.PI / 180;
+  const k = 5, N = 80;
+  const sampled = resample(pts, N);
+  const isClosed = ptDist(pts[0], pts[pts.length - 1]) < 0.25 * arcLength(pts);
+  const extLen = isClosed ? Math.round(N * 0.3) : 0;
+  const work = isClosed ? [...sampled, ...sampled.slice(0, extLen)] : sampled;
+  const wa = work.map((_, wi) => turningAngle(work, wi, k));
+  const minSpacing = Math.max(6, Math.round(N / 10));
+  const found = [];
+
+  for (let wi = k + 1; wi < work.length - k - 1; wi++) {
+    const angle = wa[wi];
+    if (angle < minAngle) continue;
+    if (angle <= wa[wi - 1] || angle <= wa[wi + 1]) continue;
+    const si = wi % N;
+    const dup = found.find(c => Math.min(Math.abs(c.si - si), N - Math.abs(c.si - si)) < minSpacing);
+    if (dup) {
+      if (angle > dup.angle) { dup.si = si; dup.angle = angle; dup.pt = sampled[si]; }
+    } else {
+      found.push({ si, angle, pt: sampled[si] });
+    }
+  }
+  found.sort((a, b) => a.si - b.si);
+  return found;
+}
+
+// --- Detector 1: Straight line ---
 function detectLine(pts) {
   const first = pts[0], last = pts[pts.length - 1];
   const chord = ptDist(first, last);
@@ -805,70 +843,60 @@ function detectLine(pts) {
   const arc = arcLength(pts);
   const maxDev = Math.max(...pts.map(p => distToSegment(p, first, last)));
   if (maxDev < 0.08 * chord && arc < 1.3 * chord) {
-    return { type: 'line', x1: first.x, y1: first.y, x2: last.x, y2: last.y };
+    return { x1: first.x, y1: first.y, x2: last.x, y2: last.y };
   }
   return null;
 }
 
-function detectEllipse(pts) {
+// --- Detector 2: Circle / Ellipse ---
+// Closed = end point within 20 % of total arc length from start.
+// Low radial variance from centroid (stdR/meanR < 0.18).
+// No sharp corner anywhere (rules out squares being misdetected as circles).
+function detectCircle(pts) {
+  const arc = arcLength(pts);
+  if (ptDist(pts[0], pts[pts.length - 1]) > 0.2 * arc) return null;
+
   const n = pts.length;
   const cx = pts.reduce((s, p) => s + p.x, 0) / n;
   const cy = pts.reduce((s, p) => s + p.y, 0) / n;
-  const radii = pts.map(p => ptDist(p, { x: cx, y: cy }));
+  const radii = pts.map(p => Math.hypot(p.x - cx, p.y - cy));
   const meanR = radii.reduce((a, b) => a + b, 0) / n;
   if (meanR < 20) return null;
   const stdR = Math.sqrt(radii.reduce((s, r) => s + (r - meanR) ** 2, 0) / n);
-  const closedDist = ptDist(pts[0], pts[pts.length - 1]);
-  const isClosed = closedDist < 0.45 * meanR * 2;
-  if (stdR / meanR < 0.22 && isClosed) {
-    const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
-    return {
-      type: 'ellipse',
-      cx, cy,
-      rx: (Math.max(...xs) - Math.min(...xs)) / 2,
-      ry: (Math.max(...ys) - Math.min(...ys)) / 2,
-    };
-  }
-  return null;
-}
+  if (stdR / meanR > 0.18) return null;
 
-// Find corner indices in a resampled stroke using angle-change peaks
-function findCorners(sampled, minAngle = 0.55) {
-  const corners = [];
-  for (let i = 2; i < sampled.length - 2; i++) {
-    const a = sampled[i - 2], b = sampled[i], c = sampled[i + 2];
-    const ax = b.x - a.x, ay = b.y - a.y;
-    const bx = c.x - b.x, by = c.y - b.y;
-    const dot = ax * bx + ay * by;
-    const cross = Math.abs(ax * by - ay * bx);
-    const angle = Math.atan2(cross, dot);
-    corners.push({ i, angle });
-  }
-  // Find local maxima above threshold
-  const peaks = [];
-  for (let j = 1; j < corners.length - 1; j++) {
-    const { i, angle } = corners[j];
-    if (angle > minAngle &&
-        angle >= corners[j - 1].angle &&
-        angle >= corners[j + 1].angle) {
-      // Suppress nearby peaks (within 5 indices)
-      if (peaks.length === 0 || i - peaks[peaks.length - 1].i > 5) {
-        peaks.push({ i, angle });
-      }
-    }
-  }
-  return peaks.map(p => sampled[p.i]);
-}
-
-function detectPolygon(pts, expectedCorners) {
-  const arc = arcLength(pts);
-  const closedDist = ptDist(pts[0], pts[pts.length - 1]);
-  if (closedDist > 0.3 * arc) return null; // not closed enough
-
+  // Reject if any sharp corner present — means it's a polygon, not a circle
   const sampled = resample(pts, 64);
-  const corners = findCorners(sampled);
-  if (Math.abs(corners.length - expectedCorners) > 1) return null;
-  return corners.length >= 2 ? corners : null;
+  for (let i = 4; i < sampled.length - 4; i++) {
+    if (turningAngle(sampled, i, 4) > Math.PI / 3) return null; // >60°
+  }
+
+  const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
+  return {
+    cx, cy,
+    rx: (Math.max(...xs) - Math.min(...xs)) / 2,
+    ry: (Math.max(...ys) - Math.min(...ys)) / 2,
+  };
+}
+
+// --- Detector 3: Rectangle / Square ---
+// Requires EXACTLY 4 sharp corners, each 50°–130° (roughly 90°).
+function detectRect(pts) {
+  if (ptDist(pts[0], pts[pts.length - 1]) > 0.25 * arcLength(pts)) return null;
+  const corners = findSharpCorners(pts, 60);
+  if (corners.length !== 4) return null;
+  const lo = 50 * Math.PI / 180, hi = 130 * Math.PI / 180;
+  if (!corners.every(c => c.angle >= lo && c.angle <= hi)) return null;
+  return corners.map(c => c.pt);
+}
+
+// --- Detector 4: Triangle ---
+// Requires EXACTLY 3 sharp corners.
+function detectTriangle(pts) {
+  if (ptDist(pts[0], pts[pts.length - 1]) > 0.25 * arcLength(pts)) return null;
+  const corners = findSharpCorners(pts, 60);
+  if (corners.length !== 3) return null;
+  return corners.map(c => c.pt);
 }
 
 // --- Shape point generators ---
@@ -877,7 +905,7 @@ function linePoints(s) {
   return [{ x: s.x1, y: s.y1 }, { x: s.x2, y: s.y2 }];
 }
 
-function ellipsePoints(s, n = 80) {
+function circlePoints(s, n = 80) {
   const pts = [];
   for (let i = 0; i <= n; i++) {
     const a = (i / n) * 2 * Math.PI;
@@ -887,19 +915,17 @@ function ellipsePoints(s, n = 80) {
 }
 
 function rectPoints(corners) {
-  // Fit a clean axis-aligned rectangle to the bounding box of detected corners
   const xs = corners.map(p => p.x), ys = corners.map(p => p.y);
   const minX = Math.min(...xs), maxX = Math.max(...xs);
   const minY = Math.min(...ys), maxY = Math.max(...ys);
   return [
     { x: minX, y: minY }, { x: maxX, y: minY },
     { x: maxX, y: maxY }, { x: minX, y: maxY },
-    { x: minX, y: minY }, // close
+    { x: minX, y: minY },
   ];
 }
 
 function trianglePoints(corners) {
-  // Use up to 3 corners; close the shape
   const tri = corners.slice(0, 3);
   return [...tri, tri[0]];
 }
@@ -940,45 +966,40 @@ function attemptShapeRecognition() {
 
   let snappedPoints = null;
 
-  // 1. Straight line (most specific — check first)
+  // 1. Straight line (priority — check first)
   const line = detectLine(pts);
-  if (line) {
-    snappedPoints = linePoints(line);
-  }
+  if (line) snappedPoints = linePoints(line);
 
   // 2. Circle / ellipse
   if (!snappedPoints) {
-    const ellipse = detectEllipse(pts);
-    if (ellipse) snappedPoints = ellipsePoints(ellipse);
+    const circle = detectCircle(pts);
+    if (circle) snappedPoints = circlePoints(circle);
   }
 
-  // 3. Triangle
+  // 3. Rectangle / square (exactly 4 corners, ~90° each)
   if (!snappedPoints) {
-    const triCorners = detectPolygon(pts, 3);
-    if (triCorners) snappedPoints = trianglePoints(triCorners);
-  }
-
-  // 4. Rectangle / square
-  if (!snappedPoints) {
-    const rectCorners = detectPolygon(pts, 4);
+    const rectCorners = detectRect(pts);
     if (rectCorners) snappedPoints = rectPoints(rectCorners);
+  }
+
+  // 4. Triangle (exactly 3 corners)
+  if (!snappedPoints) {
+    const triCorners = detectTriangle(pts);
+    if (triCorners) snappedPoints = trianglePoints(triCorners);
   }
 
   if (!snappedPoints) return; // No confident match — keep freehand
 
-  // Replace last stroke in-place
   const snapped = { points: snappedPoints, color: stroke.color, size: stroke.size };
   strokes[strokes.length - 1] = snapped;
   redraw();
   flashSnap(snapped);
 
-  // Update server and students: undo freehand, send perfect shape
   if (ws.readyState === 1) {
     ws.send(JSON.stringify({ type: 'undo' }));
     ws.send(JSON.stringify({ type: 'stroke', points: snapped.points, color: snapped.color, size: snapped.size }));
   }
 
-  // Persist updated annotations
   saveAnnotations();
 }
 
