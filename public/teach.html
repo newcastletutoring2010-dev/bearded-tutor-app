@@ -848,35 +848,28 @@ function detectLine(pts) {
   return null;
 }
 
-// --- Detector 2: Circle / Ellipse ---
-// Closed = end point within 20 % of total arc length from start.
-// Low radial variance from centroid (stdR/meanR < 0.18).
-// No sharp corner anywhere (rules out squares being misdetected as circles).
+// --- Detector 2: Circle ---
+// No closed-stroke requirement — people rarely close a freehand circle perfectly.
+// Detects by low radial variance from the centroid (stdR / meanR < 0.25).
+// Logs the variance ratio for every stroke so the threshold can be tuned.
 function detectCircle(pts) {
-  const arc = arcLength(pts);
-  if (ptDist(pts[0], pts[pts.length - 1]) > 0.2 * arc) return null;
+  if (pts.length < 20) return null;
 
   const n = pts.length;
   const cx = pts.reduce((s, p) => s + p.x, 0) / n;
   const cy = pts.reduce((s, p) => s + p.y, 0) / n;
   const radii = pts.map(p => Math.hypot(p.x - cx, p.y - cy));
   const meanR = radii.reduce((a, b) => a + b, 0) / n;
-  if (meanR < 20) return null;
+  if (meanR < 15) return null;
   const stdR = Math.sqrt(radii.reduce((s, r) => s + (r - meanR) ** 2, 0) / n);
-  if (stdR / meanR > 0.18) return null;
+  const ratio = stdR / meanR;
 
-  // Reject if any sharp corner present — means it's a polygon, not a circle
-  const sampled = resample(pts, 64);
-  for (let i = 4; i < sampled.length - 4; i++) {
-    if (turningAngle(sampled, i, 4) > Math.PI / 3) return null; // >60°
-  }
+  console.log(`[circle] variance ratio: ${ratio.toFixed(3)} (snaps if < 0.25)  points: ${n}  meanR: ${Math.round(meanR)}px`);
 
-  const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
-  return {
-    cx, cy,
-    rx: (Math.max(...xs) - Math.min(...xs)) / 2,
-    ry: (Math.max(...ys) - Math.min(...ys)) / 2,
-  };
+  if (ratio > 0.25) return null;
+
+  // Perfect circle: centroid as centre, meanR as radius
+  return { cx, cy, rx: meanR, ry: meanR };
 }
 
 // --- Detector 3: Rectangle / Square ---
