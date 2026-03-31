@@ -245,12 +245,42 @@
     text-align: center;
     padding: 16px;
   }
+
+  /* --- Canvas wrapper (receives CSS zoom/pan transform) --- */
+  #canvasWrap {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    transform-origin: 0 0;
+    touch-action: none;
+  }
+
+  /* --- Zoom indicator --- */
+  #zoomIndicator {
+    position: fixed;
+    bottom: 76px;
+    right: 16px;
+    background: rgba(0,0,0,0.6);
+    color: #fff;
+    padding: 6px 12px;
+    border-radius: 8px;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 0.9rem;
+    font-weight: 600;
+    z-index: 20;
+    opacity: 0;
+    transition: opacity 0.3s;
+    pointer-events: none;
+  }
 </style>
 </head>
 <body>
 
-<canvas id="pdfCanvas"></canvas>
-<canvas id="canvas"></canvas>
+<div id="canvasWrap">
+  <canvas id="pdfCanvas"></canvas>
+  <canvas id="canvas"></canvas>
+</div>
+<div id="zoomIndicator"></div>
 
 <div id="brushControls">
   <div class="brush-row" id="sizeRow"></div>
@@ -268,6 +298,9 @@
     <button class="pdf-btn" id="nextPageBtn">&rarr;</button>
   </div>
   <div id="pdfInfo"></div>
+  <div class="pdf-ctrl-row" id="resetZoomRow" style="display:none">
+    <button class="pdf-btn" id="resetZoomBtn">Reset Zoom</button>
+  </div>
   <div class="pdf-ctrl-row" id="annoRow" style="display:none">
     <button class="pdf-btn danger" id="clearAnnoBtn">Clear Annotations</button>
   </div>
@@ -297,12 +330,18 @@ const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
 const pdfCanvas = document.getElementById('pdfCanvas');
 const pdfCtx = pdfCanvas.getContext('2d');
+const canvasWrap = document.getElementById('canvasWrap');
+const zoomIndicatorEl = document.getElementById('zoomIndicator');
 
 let strokes = [];
 let currentStroke = [];
 let drawing = false;
 let paused = false;
 let holdTimer = null;
+
+// --- Zoom / pan state ---
+let zoom = 1;
+let panX = 0, panY = 0;
 
 // --- PDF state ---
 let pdfDoc = null;
@@ -352,6 +391,27 @@ function resize() {
 window.addEventListener('resize', resize);
 resize();
 
+// --- Zoom / pan helpers ---
+
+// Convert a screen (clientX/Y) position to canvas logical coordinates
+function toCanvas(clientX, clientY) {
+  return { x: (clientX - panX) / zoom, y: (clientY - panY) / zoom };
+}
+
+function applyTransform() {
+  canvasWrap.style.transform = `translate(${panX}px, ${panY}px) scale(${zoom})`;
+  const notDefault = zoom !== 1 || panX !== 0 || panY !== 0;
+  document.getElementById('resetZoomRow').style.display = notDefault ? '' : 'none';
+}
+
+let zoomIndicatorTimer = null;
+function showZoomIndicator() {
+  zoomIndicatorEl.textContent = Math.round(zoom * 100) + '%';
+  zoomIndicatorEl.style.opacity = '1';
+  clearTimeout(zoomIndicatorTimer);
+  zoomIndicatorTimer = setTimeout(() => { zoomIndicatorEl.style.opacity = '0'; }, 2000);
+}
+
 // --- Drawing helpers ---
 function drawStroke(stroke) {
   const pts = stroke.points || stroke;
@@ -383,14 +443,14 @@ canvas.addEventListener('pointerdown', (e) => {
     holdTimer = null;
   }
   drawing = true;
-  currentStroke = [{ x: e.clientX, y: e.clientY }];
+  currentStroke = [toCanvas(e.clientX, e.clientY)];
   canvas.setPointerCapture(e.pointerId);
 });
 
 canvas.addEventListener('pointermove', (e) => {
   if (!drawing) return;
   e.preventDefault();
-  const pt = { x: e.clientX, y: e.clientY };
+  const pt = toCanvas(e.clientX, e.clientY);
   currentStroke.push(pt);
   if (currentStroke.length >= 2) {
     const prev = currentStroke[currentStroke.length - 2];
@@ -996,23 +1056,87 @@ function attemptShapeRecognition() {
   saveAnnotations();
 }
 
-// --- Swipe navigation for PDF pages ---
+// --- Pinch-to-zoom, two-finger pan, single-finger swipe ---
+// All touch handling is on canvasWrap so pointer events on canvas
+// (Apple Pencil / mouse) remain completely unaffected.
+
+let activeTouches = {}; // identifier → { x, y }
 let swipeStartX = null;
-canvas.addEventListener('touchstart', (e) => {
-  if (!pdfDoc) return;
-  if (e.touches.length === 1) {
+
+canvasWrap.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    activeTouches[t.identifier] = { x: t.clientX, y: t.clientY };
+  }
+  // Track swipe start for single-finger PDF page navigation
+  if (e.touches.length === 1 && pdfDoc) {
     swipeStartX = e.touches[0].clientX;
+  } else {
+    swipeStartX = null; // multi-touch cancels any swipe
   }
-});
-canvas.addEventListener('touchend', (e) => {
-  if (!pdfDoc || swipeStartX === null) return;
-  const endX = e.changedTouches[0].clientX;
-  const diff = endX - swipeStartX;
+}, { passive: false });
+
+canvasWrap.addEventListener('touchmove', (e) => {
+  e.preventDefault();
+  if (e.touches.length !== 2) {
+    // Keep activeTouches up to date for single-finger moves
+    for (const t of e.changedTouches) {
+      activeTouches[t.identifier] = { x: t.clientX, y: t.clientY };
+    }
+    return;
+  }
+
+  const t1 = e.touches[0], t2 = e.touches[1];
+  const prev1 = activeTouches[t1.identifier];
+  const prev2 = activeTouches[t2.identifier];
+  if (!prev1 || !prev2) return;
+
+  const prevMidX = (prev1.x + prev2.x) / 2;
+  const prevMidY = (prev1.y + prev2.y) / 2;
+  const prevDist = Math.hypot(prev2.x - prev1.x, prev2.y - prev1.y);
+
+  const midX = (t1.clientX + t2.clientX) / 2;
+  const midY = (t1.clientY + t2.clientY) / 2;
+  const dist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+
+  if (prevDist > 0) {
+    const newZoom = Math.max(0.5, Math.min(4, zoom * (dist / prevDist)));
+    const dz = newZoom / zoom;
+    // Zoom around prevMid, then translate to follow the new midpoint
+    panX = prevMidX * (1 - dz) + panX * dz + (midX - prevMidX);
+    panY = prevMidY * (1 - dz) + panY * dz + (midY - prevMidY);
+    zoom = newZoom;
+    applyTransform();
+    showZoomIndicator();
+  }
+
+  activeTouches[t1.identifier] = { x: t1.clientX, y: t1.clientY };
+  activeTouches[t2.identifier] = { x: t2.clientX, y: t2.clientY };
+}, { passive: false });
+
+canvasWrap.addEventListener('touchend', (e) => {
+  for (const t of e.changedTouches) delete activeTouches[t.identifier];
+  // Single-finger swipe → PDF page change
+  if (swipeStartX !== null && pdfDoc && e.touches.length === 0) {
+    const diff = e.changedTouches[0].clientX - swipeStartX;
+    if (Math.abs(diff) > 80) {
+      if (diff < 0) changePage(pdfPageNum + 1);
+      else changePage(pdfPageNum - 1);
+    }
+  }
   swipeStartX = null;
-  if (Math.abs(diff) > 80) {
-    if (diff < 0) changePage(pdfPageNum + 1); // swipe left = next
-    else changePage(pdfPageNum - 1);           // swipe right = prev
-  }
+});
+
+canvasWrap.addEventListener('touchcancel', (e) => {
+  for (const t of e.changedTouches) delete activeTouches[t.identifier];
+  swipeStartX = null;
+});
+
+// --- Reset zoom button ---
+document.getElementById('resetZoomBtn').addEventListener('click', () => {
+  zoom = 1; panX = 0; panY = 0;
+  applyTransform();
+  showZoomIndicator();
 });
 </script>
 </body>
