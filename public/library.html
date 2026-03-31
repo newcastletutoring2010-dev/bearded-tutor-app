@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Library — Bearded Tutor</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #f5f5f5;
+    color: #333;
+    min-height: 100vh;
+  }
+
+  header {
+    background: #fff;
+    border-bottom: 1px solid #e0e0e0;
+    padding: 16px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  header h1 { font-size: 1.4rem; font-weight: 700; }
+  header a {
+    color: #2196F3;
+    text-decoration: none;
+    font-weight: 600;
+    font-size: 0.95rem;
+  }
+
+  .container { max-width: 800px; margin: 0 auto; padding: 24px; }
+
+  .section-title {
+    font-size: 1.1rem;
+    font-weight: 600;
+    margin-bottom: 12px;
+    color: #555;
+  }
+
+  /* Add student */
+  .add-row {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 24px;
+  }
+  .add-row input {
+    flex: 1;
+    padding: 10px 14px;
+    border: 2px solid #ddd;
+    border-radius: 8px;
+    font-size: 1rem;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  .add-row input:focus { border-color: #2196F3; }
+
+  .btn {
+    padding: 10px 20px;
+    border: none;
+    border-radius: 8px;
+    font-size: 0.95rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  .btn-primary { background: #2196F3; color: #fff; }
+  .btn-primary:hover { background: #1976D2; }
+  .btn-danger { background: #e74c3c; color: #fff; }
+  .btn-danger:hover { background: #c0392b; }
+  .btn-sm { padding: 6px 12px; font-size: 0.85rem; }
+
+  /* Student list */
+  .student-card {
+    background: #fff;
+    border-radius: 12px;
+    padding: 16px 20px;
+    margin-bottom: 12px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+    cursor: pointer;
+    transition: box-shadow 0.15s;
+  }
+  .student-card:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.12); }
+  .student-card.active { border-left: 4px solid #2196F3; }
+
+  .student-name {
+    font-size: 1.1rem;
+    font-weight: 600;
+    text-transform: capitalize;
+  }
+
+  .student-meta {
+    font-size: 0.85rem;
+    color: #888;
+    margin-top: 2px;
+  }
+
+  /* PDF section */
+  #pdfSection {
+    display: none;
+    margin-top: 24px;
+  }
+  #pdfSection.visible { display: block; }
+
+  .pdf-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+  }
+  .pdf-header h2 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    text-transform: capitalize;
+  }
+
+  .upload-area {
+    border: 2px dashed #ccc;
+    border-radius: 10px;
+    padding: 20px;
+    text-align: center;
+    margin-bottom: 16px;
+    transition: border-color 0.2s, background 0.2s;
+    cursor: pointer;
+  }
+  .upload-area:hover, .upload-area.dragover {
+    border-color: #2196F3;
+    background: #e3f2fd;
+  }
+  .upload-area p { color: #888; font-size: 0.95rem; }
+  .upload-area input { display: none; }
+
+  .pdf-list { list-style: none; }
+  .pdf-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    background: #fff;
+    border-radius: 8px;
+    margin-bottom: 6px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+  }
+  .pdf-item-name {
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .pdf-icon { font-size: 1.2rem; }
+
+  .empty-state {
+    text-align: center;
+    color: #aaa;
+    padding: 20px;
+    font-size: 0.95rem;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Student Library</h1>
+  <a href="/teach">Back to Teach</a>
+</header>
+
+<div class="container">
+  <div class="section-title">Add Student</div>
+  <div class="add-row">
+    <input type="text" id="studentInput" placeholder="Student name (e.g. Alex)" />
+    <button class="btn btn-primary" id="addStudentBtn">Add</button>
+  </div>
+
+  <div class="section-title">Students</div>
+  <div id="studentList"></div>
+
+  <div id="pdfSection">
+    <div class="pdf-header">
+      <h2 id="pdfStudentName"></h2>
+    </div>
+
+    <div class="upload-area" id="uploadArea">
+      <p>Drop PDF here or click to upload</p>
+      <input type="file" id="fileInput" accept=".pdf" />
+    </div>
+
+    <div class="section-title">PDFs</div>
+    <ul class="pdf-list" id="pdfList"></ul>
+  </div>
+</div>
+
+<script>
+let selectedStudent = null;
+
+const studentInput = document.getElementById('studentInput');
+const addStudentBtn = document.getElementById('addStudentBtn');
+const studentList = document.getElementById('studentList');
+const pdfSection = document.getElementById('pdfSection');
+const pdfStudentName = document.getElementById('pdfStudentName');
+const pdfList = document.getElementById('pdfList');
+const uploadArea = document.getElementById('uploadArea');
+const fileInput = document.getElementById('fileInput');
+
+// --- Students ---
+async function loadStudents() {
+  const res = await fetch('/api/students');
+  const students = await res.json();
+  studentList.innerHTML = '';
+  if (students.length === 0) {
+    studentList.innerHTML = '<div class="empty-state">No students yet. Add one above.</div>';
+    return;
+  }
+  for (const s of students) {
+    const card = document.createElement('div');
+    card.className = 'student-card' + (s === selectedStudent ? ' active' : '');
+    card.innerHTML = `<div class="student-name">${s}</div>`;
+    card.addEventListener('click', () => selectStudent(s));
+    studentList.appendChild(card);
+  }
+}
+
+async function addStudent() {
+  const name = studentInput.value.trim();
+  if (!name) return;
+  await fetch(`/api/students/${encodeURIComponent(name)}`, { method: 'POST' });
+  studentInput.value = '';
+  await loadStudents();
+  selectStudent(name.toLowerCase().replace(/[^a-z0-9_-]/g, ''));
+}
+
+addStudentBtn.addEventListener('click', addStudent);
+studentInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') addStudent(); });
+
+// --- Student selection ---
+async function selectStudent(name) {
+  selectedStudent = name;
+  pdfSection.classList.add('visible');
+  pdfStudentName.textContent = name + "'s PDFs";
+  loadStudents();
+  loadPdfs();
+}
+
+// --- PDFs ---
+async function loadPdfs() {
+  if (!selectedStudent) return;
+  const res = await fetch(`/api/students/${encodeURIComponent(selectedStudent)}/pdfs`);
+  const pdfs = await res.json();
+  pdfList.innerHTML = '';
+  if (pdfs.length === 0) {
+    pdfList.innerHTML = '<div class="empty-state">No PDFs yet. Upload one above.</div>';
+    return;
+  }
+  for (const pdf of pdfs) {
+    const li = document.createElement('li');
+    li.className = 'pdf-item';
+    li.innerHTML = `
+      <span class="pdf-item-name"><span class="pdf-icon">&#128196;</span> ${pdf}</span>
+      <button class="btn btn-danger btn-sm" data-pdf="${pdf}">Delete</button>
+    `;
+    li.querySelector('button').addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (!confirm(`Delete ${pdf}?`)) return;
+      await fetch(`/api/students/${encodeURIComponent(selectedStudent)}/pdfs/${encodeURIComponent(pdf)}`, { method: 'DELETE' });
+      loadPdfs();
+    });
+    pdfList.appendChild(li);
+  }
+}
+
+// --- Upload ---
+uploadArea.addEventListener('click', () => fileInput.click());
+uploadArea.addEventListener('dragover', (e) => { e.preventDefault(); uploadArea.classList.add('dragover'); });
+uploadArea.addEventListener('dragleave', () => uploadArea.classList.remove('dragover'));
+uploadArea.addEventListener('drop', (e) => {
+  e.preventDefault();
+  uploadArea.classList.remove('dragover');
+  if (e.dataTransfer.files.length) uploadFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', () => {
+  if (fileInput.files.length) uploadFile(fileInput.files[0]);
+  fileInput.value = '';
+});
+
+async function uploadFile(file) {
+  if (!selectedStudent) return alert('Select a student first');
+  if (!file.name.endsWith('.pdf')) return alert('Only PDF files allowed');
+  const fd = new FormData();
+  fd.append('pdf', file);
+  uploadArea.querySelector('p').textContent = 'Uploading...';
+  await fetch(`/api/students/${encodeURIComponent(selectedStudent)}/upload`, {
+    method: 'POST',
+    body: fd,
+  });
+  uploadArea.querySelector('p').textContent = 'Drop PDF here or click to upload';
+  loadPdfs();
+}
+
+// Init
+loadStudents();
+</script>
+</body>
+</html>

@@ -4,16 +4,29 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
 <title>Teacher — Bearded Tutor</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { width: 100%; height: 100%; overflow: hidden; background: #fff; }
 
+  #pdfCanvas {
+    display: none;
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    z-index: 0;
+    object-fit: contain;
+  }
+
   #canvas {
     display: block;
+    position: absolute;
+    top: 0; left: 0;
     width: 100%;
     height: 100%;
     touch-action: none;
     cursor: crosshair;
+    z-index: 1;
   }
 
   #controls {
@@ -112,15 +125,152 @@
     box-shadow: inset 0 0 0 1px rgba(0,0,0,0.15);
   }
   .color-btn.active { border-color: #2196F3; box-shadow: 0 0 0 2px #2196F3; }
+
+  /* --- PDF controls --- */
+  #pdfControls {
+    position: fixed;
+    top: 12px;
+    left: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    z-index: 10;
+    background: rgba(255,255,255,0.92);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    border-radius: 14px;
+    padding: 10px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.12);
+  }
+
+  .pdf-ctrl-row {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .pdf-btn {
+    padding: 8px 14px;
+    border: 2px solid #333;
+    border-radius: 8px;
+    background: #fff;
+    color: #333;
+    font-weight: 600;
+    font-size: 0.85rem;
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+    transition: background 0.15s, color 0.15s;
+  }
+  .pdf-btn:active { background: #333; color: #fff; }
+  .pdf-btn.primary { background: #2196F3; color: #fff; border-color: #2196F3; }
+  .pdf-btn.primary:hover { background: #1976D2; }
+  .pdf-btn.danger { background: #e74c3c; color: #fff; border-color: #e74c3c; }
+  .pdf-btn:disabled { opacity: 0.4; cursor: default; }
+
+  #pageInfo {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #555;
+    text-align: center;
+    min-width: 60px;
+  }
+
+  #pdfInfo {
+    font-size: 0.75rem;
+    color: #888;
+    text-align: center;
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* --- PDF Picker modal --- */
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.5);
+    z-index: 100;
+    align-items: center;
+    justify-content: center;
+  }
+  .modal-overlay.visible { display: flex; }
+
+  .modal {
+    background: #fff;
+    border-radius: 16px;
+    padding: 24px;
+    max-width: 420px;
+    width: 90%;
+    max-height: 80vh;
+    overflow-y: auto;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+  }
+  .modal h2 { font-size: 1.2rem; margin-bottom: 16px; }
+  .modal-close {
+    float: right;
+    background: none;
+    border: none;
+    font-size: 1.4rem;
+    cursor: pointer;
+    color: #888;
+    padding: 0 4px;
+  }
+
+  .picker-item {
+    padding: 10px 14px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-weight: 500;
+    transition: background 0.15s;
+    text-transform: capitalize;
+  }
+  .picker-item:hover { background: #e3f2fd; }
+  .picker-item + .picker-item { margin-top: 4px; }
+
+  .picker-back {
+    display: inline-block;
+    margin-bottom: 12px;
+    color: #2196F3;
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 0.9rem;
+  }
+
+  .picker-empty {
+    color: #aaa;
+    text-align: center;
+    padding: 16px;
+  }
 </style>
 </head>
 <body>
 
+<canvas id="pdfCanvas"></canvas>
 <canvas id="canvas"></canvas>
 
 <div id="brushControls">
   <div class="brush-row" id="sizeRow"></div>
   <div class="brush-row" id="colorRow"></div>
+</div>
+
+<div id="pdfControls">
+  <div class="pdf-ctrl-row">
+    <button class="pdf-btn primary" id="loadPdfBtn">Load PDF</button>
+    <button class="pdf-btn" id="closePdfBtn" style="display:none">Close PDF</button>
+  </div>
+  <div class="pdf-ctrl-row" id="pageNav" style="display:none">
+    <button class="pdf-btn" id="prevPageBtn" disabled>&larr;</button>
+    <span id="pageInfo">1 / 1</span>
+    <button class="pdf-btn" id="nextPageBtn">&rarr;</button>
+  </div>
+  <div id="pdfInfo"></div>
+  <div class="pdf-ctrl-row" id="annoRow" style="display:none">
+    <button class="pdf-btn danger" id="clearAnnoBtn">Clear Annotations</button>
+  </div>
 </div>
 
 <div id="controls">
@@ -130,14 +280,36 @@
   <button id="clearBtn">Clear</button>
 </div>
 
+<!-- PDF Picker Modal -->
+<div class="modal-overlay" id="pickerOverlay">
+  <div class="modal">
+    <button class="modal-close" id="pickerClose">&times;</button>
+    <h2 id="pickerTitle">Choose Student</h2>
+    <div id="pickerContent"></div>
+  </div>
+</div>
+
 <script>
+// --- PDF.js worker ---
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
+const pdfCanvas = document.getElementById('pdfCanvas');
+const pdfCtx = pdfCanvas.getContext('2d');
 
-let strokes = [];       // Array of stroke objects: { points, color, size }
+let strokes = [];
 let currentStroke = [];
 let drawing = false;
 let paused = false;
+
+// --- PDF state ---
+let pdfDoc = null;
+let pdfPageNum = 1;
+let pdfTotalPages = 0;
+let pdfStudent = null;
+let pdfFilename = null;
+let savingAnnotations = false;
 
 // --- Brush state ---
 const SIZES = [
@@ -155,17 +327,26 @@ const COLORS = [
   { name: 'White', value: '#ffffff' },
 ];
 let currentColor = COLORS[0].value;
-let currentSize = SIZES[1].value; // Medium default
+let currentSize = SIZES[1].value;
 
 // --- Hi-DPI support ---
 function resize() {
   const dpr = window.devicePixelRatio || 1;
-  canvas.width = window.innerWidth * dpr;
-  canvas.height = window.innerHeight * dpr;
-  canvas.style.width = window.innerWidth + 'px';
-  canvas.style.height = window.innerHeight + 'px';
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  canvas.width = w * dpr;
+  canvas.height = h * dpr;
+  canvas.style.width = w + 'px';
+  canvas.style.height = h + 'px';
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  // Also resize PDF canvas
+  pdfCanvas.width = w * dpr;
+  pdfCanvas.height = h * dpr;
+  pdfCanvas.style.width = w + 'px';
+  pdfCanvas.style.height = h + 'px';
+  pdfCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
   redraw();
+  if (pdfDoc) renderPdfPage();
 }
 window.addEventListener('resize', resize);
 resize();
@@ -191,10 +372,9 @@ function redraw() {
   for (const s of strokes) drawStroke(s);
 }
 
-// --- Pointer events (Apple Pencil compatible) ---
+// --- Pointer events ---
 canvas.addEventListener('pointerdown', (e) => {
-  // Only draw with pen or primary mouse button
-  if (e.pointerType === 'touch') return; // reject finger on iPad
+  if (e.pointerType === 'touch') return;
   e.preventDefault();
   drawing = true;
   currentStroke = [{ x: e.clientX, y: e.clientY }];
@@ -206,7 +386,6 @@ canvas.addEventListener('pointermove', (e) => {
   e.preventDefault();
   const pt = { x: e.clientX, y: e.clientY };
   currentStroke.push(pt);
-  // Draw incremental segment
   if (currentStroke.length >= 2) {
     const prev = currentStroke[currentStroke.length - 2];
     ctx.beginPath();
@@ -228,6 +407,7 @@ canvas.addEventListener('pointerup', (e) => {
     const stroke = { points: currentStroke, color: currentColor, size: currentSize };
     strokes.push(stroke);
     sendStroke(stroke);
+    saveAnnotations();
   }
   currentStroke = [];
 });
@@ -261,7 +441,6 @@ function sendStroke(stroke) {
 }
 
 function getSnapshot() {
-  // Export at display resolution
   return canvas.toDataURL('image/png');
 }
 
@@ -292,19 +471,21 @@ undoBtn.addEventListener('click', () => {
   strokes.pop();
   redraw();
   ws.send(JSON.stringify({ type: 'undo' }));
+  saveAnnotations();
 });
 
 clearBtn.addEventListener('click', () => {
   strokes = [];
   redraw();
   ws.send(JSON.stringify({ type: 'clear' }));
+  saveAnnotations();
 });
 
 // --- Build brush controls ---
 const sizeRow = document.getElementById('sizeRow');
 const colorRow = document.getElementById('colorRow');
 
-SIZES.forEach((s, i) => {
+SIZES.forEach((s) => {
   const btn = document.createElement('button');
   btn.className = 'size-btn' + (s.value === currentSize ? ' active' : '');
   btn.title = s.name;
@@ -333,6 +514,244 @@ COLORS.forEach((c) => {
     btn.classList.add('active');
   });
   colorRow.appendChild(btn);
+});
+
+// =====================================================
+// PDF LOADING & RENDERING
+// =====================================================
+const loadPdfBtn = document.getElementById('loadPdfBtn');
+const closePdfBtn = document.getElementById('closePdfBtn');
+const pageNav = document.getElementById('pageNav');
+const prevPageBtn = document.getElementById('prevPageBtn');
+const nextPageBtn = document.getElementById('nextPageBtn');
+const pageInfo = document.getElementById('pageInfo');
+const pdfInfo = document.getElementById('pdfInfo');
+const annoRow = document.getElementById('annoRow');
+const clearAnnoBtn = document.getElementById('clearAnnoBtn');
+const pickerOverlay = document.getElementById('pickerOverlay');
+const pickerClose = document.getElementById('pickerClose');
+const pickerTitle = document.getElementById('pickerTitle');
+const pickerContent = document.getElementById('pickerContent');
+
+// --- PDF Picker ---
+loadPdfBtn.addEventListener('click', openPicker);
+pickerClose.addEventListener('click', () => pickerOverlay.classList.remove('visible'));
+pickerOverlay.addEventListener('click', (e) => { if (e.target === pickerOverlay) pickerOverlay.classList.remove('visible'); });
+
+async function openPicker() {
+  pickerTitle.textContent = 'Choose Student';
+  pickerContent.innerHTML = '';
+  const res = await fetch('/api/students');
+  const students = await res.json();
+  if (students.length === 0) {
+    pickerContent.innerHTML = '<div class="picker-empty">No students. Add them in the Library.</div>';
+    pickerOverlay.classList.add('visible');
+    return;
+  }
+  for (const s of students) {
+    const div = document.createElement('div');
+    div.className = 'picker-item';
+    div.textContent = s;
+    div.addEventListener('click', () => showStudentPdfs(s));
+    pickerContent.appendChild(div);
+  }
+  pickerOverlay.classList.add('visible');
+}
+
+async function showStudentPdfs(student) {
+  pickerTitle.textContent = student + "'s PDFs";
+  pickerContent.innerHTML = '<span class="picker-back" id="pickerBack">&larr; Back</span>';
+  document.getElementById('pickerBack').addEventListener('click', openPicker);
+
+  const res = await fetch(`/api/students/${encodeURIComponent(student)}/pdfs`);
+  const pdfs = await res.json();
+  if (pdfs.length === 0) {
+    pickerContent.innerHTML += '<div class="picker-empty">No PDFs. Upload them in the Library.</div>';
+    return;
+  }
+  for (const pdf of pdfs) {
+    const div = document.createElement('div');
+    div.className = 'picker-item';
+    div.textContent = pdf;
+    div.addEventListener('click', () => loadPdf(student, pdf));
+    pickerContent.appendChild(div);
+  }
+}
+
+// --- Load PDF ---
+async function loadPdf(student, filename) {
+  pickerOverlay.classList.remove('visible');
+  pdfStudent = student;
+  pdfFilename = filename;
+
+  const url = `/uploads/${encodeURIComponent(student)}/${encodeURIComponent(filename)}`;
+  const loadingTask = pdfjsLib.getDocument(url);
+  pdfDoc = await loadingTask.promise;
+  pdfTotalPages = pdfDoc.numPages;
+  pdfPageNum = 1;
+
+  // Show PDF UI
+  pdfCanvas.style.display = 'block';
+  closePdfBtn.style.display = '';
+  pageNav.style.display = '';
+  annoRow.style.display = '';
+  pdfInfo.textContent = student + ' / ' + filename;
+
+  // Notify server & students
+  ws.send(JSON.stringify({
+    type: 'pdf-load',
+    student,
+    filename,
+    page: 1,
+    totalPages: pdfTotalPages,
+  }));
+
+  await renderPdfPage();
+  await loadAnnotations();
+}
+
+// --- Render PDF page ---
+async function renderPdfPage() {
+  if (!pdfDoc) return;
+  const page = await pdfDoc.getPage(pdfPageNum);
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const pdfViewport = page.getViewport({ scale: 1 });
+  const scale = Math.min(vw / pdfViewport.width, vh / pdfViewport.height);
+  const viewport = page.getViewport({ scale });
+
+  const dpr = window.devicePixelRatio || 1;
+  pdfCanvas.width = vw * dpr;
+  pdfCanvas.height = vh * dpr;
+  pdfCanvas.style.width = vw + 'px';
+  pdfCanvas.style.height = vh + 'px';
+
+  const renderCtx = pdfCanvas.getContext('2d');
+  renderCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  renderCtx.clearRect(0, 0, vw, vh);
+
+  // Center the PDF on the canvas
+  const offsetX = (vw - viewport.width) / 2;
+  const offsetY = (vh - viewport.height) / 2;
+  renderCtx.translate(offsetX, offsetY);
+
+  await page.render({
+    canvasContext: renderCtx,
+    viewport,
+  }).promise;
+
+  updatePageUI();
+}
+
+function updatePageUI() {
+  pageInfo.textContent = pdfPageNum + ' / ' + pdfTotalPages;
+  prevPageBtn.disabled = pdfPageNum <= 1;
+  nextPageBtn.disabled = pdfPageNum >= pdfTotalPages;
+}
+
+// --- Page navigation ---
+prevPageBtn.addEventListener('click', () => changePage(pdfPageNum - 1));
+nextPageBtn.addEventListener('click', () => changePage(pdfPageNum + 1));
+
+async function changePage(num) {
+  if (!pdfDoc || num < 1 || num > pdfTotalPages) return;
+  // Save current page annotations before changing
+  await saveAnnotations();
+  pdfPageNum = num;
+  strokes = [];
+  redraw();
+  await renderPdfPage();
+  await loadAnnotations();
+
+  ws.send(JSON.stringify({ type: 'pdf-page', page: pdfPageNum }));
+}
+
+// --- Close PDF ---
+closePdfBtn.addEventListener('click', async () => {
+  await saveAnnotations();
+  pdfDoc = null;
+  pdfStudent = null;
+  pdfFilename = null;
+  pdfPageNum = 1;
+  pdfTotalPages = 0;
+  strokes = [];
+  redraw();
+
+  pdfCanvas.style.display = 'none';
+  const dpr = window.devicePixelRatio || 1;
+  pdfCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  pdfCtx.clearRect(0, 0, pdfCanvas.width, pdfCanvas.height);
+
+  closePdfBtn.style.display = 'none';
+  pageNav.style.display = 'none';
+  annoRow.style.display = 'none';
+  pdfInfo.textContent = '';
+
+  ws.send(JSON.stringify({ type: 'pdf-unload' }));
+});
+
+// --- Clear annotations for current page ---
+clearAnnoBtn.addEventListener('click', async () => {
+  if (!pdfStudent || !pdfFilename) return;
+  strokes = [];
+  redraw();
+  ws.send(JSON.stringify({ type: 'clear' }));
+  await fetch(`/api/annotations/${encodeURIComponent(pdfStudent)}/${encodeURIComponent(pdfFilename)}/${pdfPageNum}`, {
+    method: 'DELETE',
+  });
+});
+
+// =====================================================
+// ANNOTATION PERSISTENCE
+// =====================================================
+async function saveAnnotations() {
+  if (!pdfStudent || !pdfFilename || savingAnnotations) return;
+  savingAnnotations = true;
+  try {
+    await fetch(`/api/annotations/${encodeURIComponent(pdfStudent)}/${encodeURIComponent(pdfFilename)}/${pdfPageNum}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ strokes }),
+    });
+  } catch (err) {
+    console.error('Failed to save annotations:', err);
+  }
+  savingAnnotations = false;
+}
+
+async function loadAnnotations() {
+  if (!pdfStudent || !pdfFilename) return;
+  try {
+    const res = await fetch(`/api/annotations/${encodeURIComponent(pdfStudent)}/${encodeURIComponent(pdfFilename)}/${pdfPageNum}`);
+    const data = await res.json();
+    strokes = data.strokes || [];
+    redraw();
+    // Send to students too
+    if (strokes.length > 0) {
+      ws.send(JSON.stringify({ type: 'reveal', snapshot: null, strokes }));
+    }
+  } catch (err) {
+    console.error('Failed to load annotations:', err);
+  }
+}
+
+// --- Swipe navigation for PDF pages ---
+let swipeStartX = null;
+canvas.addEventListener('touchstart', (e) => {
+  if (!pdfDoc) return;
+  if (e.touches.length === 1) {
+    swipeStartX = e.touches[0].clientX;
+  }
+});
+canvas.addEventListener('touchend', (e) => {
+  if (!pdfDoc || swipeStartX === null) return;
+  const endX = e.changedTouches[0].clientX;
+  const diff = endX - swipeStartX;
+  swipeStartX = null;
+  if (Math.abs(diff) > 80) {
+    if (diff < 0) changePage(pdfPageNum + 1); // swipe left = next
+    else changePage(pdfPageNum - 1);           // swipe right = prev
+  }
 });
 </script>
 </body>

@@ -4,15 +4,27 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
 <title>Student — Bearded Tutor</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { width: 100%; height: 100%; overflow: hidden; background: #fff; }
 
+  #pdfCanvas {
+    display: none;
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    z-index: 0;
+  }
+
   #canvas {
     display: block;
+    position: absolute;
+    top: 0; left: 0;
     width: 100%;
     height: 100%;
     touch-action: none;
+    z-index: 1;
   }
 
   #status {
@@ -43,30 +55,70 @@
     background: #2ecc71;
     color: #fff;
   }
+
+  #pdfStatus {
+    position: fixed;
+    bottom: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 6px 14px;
+    border-radius: 8px;
+    background: rgba(0,0,0,0.6);
+    color: #fff;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 0.8rem;
+    font-weight: 500;
+    z-index: 10;
+    opacity: 0;
+    transition: opacity 0.3s;
+    pointer-events: none;
+  }
+  #pdfStatus.visible { opacity: 1; }
 </style>
 </head>
 <body>
 
+<canvas id="pdfCanvas"></canvas>
 <canvas id="canvas"></canvas>
 <div id="status"></div>
+<div id="pdfStatus"></div>
 
 <script>
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
+const pdfCanvas = document.getElementById('pdfCanvas');
+const pdfCtx = pdfCanvas.getContext('2d');
 const statusEl = document.getElementById('status');
+const pdfStatusEl = document.getElementById('pdfStatus');
 
 let strokes = [];
 let paused = false;
 
+// --- PDF state ---
+let pdfDoc = null;
+let pdfPageNum = 1;
+let pdfStudent = null;
+let pdfFilename = null;
+
 // --- Hi-DPI ---
 function resize() {
   const dpr = window.devicePixelRatio || 1;
-  canvas.width = window.innerWidth * dpr;
-  canvas.height = window.innerHeight * dpr;
-  canvas.style.width = window.innerWidth + 'px';
-  canvas.style.height = window.innerHeight + 'px';
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  canvas.width = w * dpr;
+  canvas.height = h * dpr;
+  canvas.style.width = w + 'px';
+  canvas.style.height = h + 'px';
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  pdfCanvas.width = w * dpr;
+  pdfCanvas.height = h * dpr;
+  pdfCanvas.style.width = w + 'px';
+  pdfCanvas.style.height = h + 'px';
+  pdfCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
   redraw();
+  if (pdfDoc) renderPdfPage();
 }
 window.addEventListener('resize', resize);
 resize();
@@ -103,6 +155,67 @@ function showStatus(text, cls) {
   }
 }
 
+function showPdfStatus(text) {
+  pdfStatusEl.textContent = text;
+  pdfStatusEl.classList.add('visible');
+  clearTimeout(pdfStatusEl._timer);
+  pdfStatusEl._timer = setTimeout(() => {
+    pdfStatusEl.classList.remove('visible');
+  }, 3000);
+}
+
+// --- PDF rendering ---
+async function loadPdf(student, filename) {
+  pdfStudent = student;
+  pdfFilename = filename;
+  const url = `/uploads/${encodeURIComponent(student)}/${encodeURIComponent(filename)}`;
+  const loadingTask = pdfjsLib.getDocument(url);
+  pdfDoc = await loadingTask.promise;
+  pdfCanvas.style.display = 'block';
+  showPdfStatus(student + ' / ' + filename);
+}
+
+async function renderPdfPage() {
+  if (!pdfDoc) return;
+  const pageNum = Math.min(pdfPageNum, pdfDoc.numPages);
+  const page = await pdfDoc.getPage(pageNum);
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const pdfViewport = page.getViewport({ scale: 1 });
+  const scale = Math.min(vw / pdfViewport.width, vh / pdfViewport.height);
+  const viewport = page.getViewport({ scale });
+
+  const dpr = window.devicePixelRatio || 1;
+  pdfCanvas.width = vw * dpr;
+  pdfCanvas.height = vh * dpr;
+  pdfCanvas.style.width = vw + 'px';
+  pdfCanvas.style.height = vh + 'px';
+
+  const renderCtx = pdfCanvas.getContext('2d');
+  renderCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  renderCtx.clearRect(0, 0, vw, vh);
+
+  const offsetX = (vw - viewport.width) / 2;
+  const offsetY = (vh - viewport.height) / 2;
+  renderCtx.translate(offsetX, offsetY);
+
+  await page.render({
+    canvasContext: renderCtx,
+    viewport,
+  }).promise;
+}
+
+function closePdf() {
+  pdfDoc = null;
+  pdfStudent = null;
+  pdfFilename = null;
+  pdfPageNum = 1;
+  pdfCanvas.style.display = 'none';
+  const dpr = window.devicePixelRatio || 1;
+  pdfCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  pdfCtx.clearRect(0, 0, pdfCanvas.width, pdfCanvas.height);
+}
+
 // --- WebSocket ---
 const proto = location.protocol === 'https:' ? 'wss' : 'ws';
 const ws = new WebSocket(`${proto}://${location.host}`);
@@ -111,7 +224,7 @@ ws.addEventListener('open', () => {
   ws.send(JSON.stringify({ type: 'register', role: 'student' }));
 });
 
-ws.addEventListener('message', (e) => {
+ws.addEventListener('message', async (e) => {
   const msg = JSON.parse(e.data);
 
   switch (msg.type) {
@@ -120,6 +233,13 @@ ws.addEventListener('message', (e) => {
       if (paused && msg.revealedImage) {
         loadSnapshot(msg.revealedImage);
         showStatus('Paused', 'paused');
+      }
+      // If a PDF is currently loaded on teacher side
+      if (msg.currentPdf && msg.currentPdf.student && msg.currentPdf.filename) {
+        await loadPdf(msg.currentPdf.student, msg.currentPdf.filename);
+        pdfPageNum = msg.currentPdf.page || 1;
+        await renderPdfPage();
+        showPdfStatus(msg.currentPdf.student + ' / ' + msg.currentPdf.filename + ' — Page ' + pdfPageNum);
       }
       break;
 
@@ -157,10 +277,37 @@ ws.addEventListener('message', (e) => {
         loadSnapshot(msg.snapshot);
       }
       break;
+
+    // --- PDF events ---
+    case 'pdf-load':
+      strokes = [];
+      redraw();
+      await loadPdf(msg.student, msg.filename);
+      pdfPageNum = msg.page || 1;
+      await renderPdfPage();
+      showPdfStatus(msg.student + ' / ' + msg.filename + ' — Page ' + pdfPageNum);
+      break;
+
+    case 'pdf-page':
+      strokes = [];
+      redraw();
+      pdfPageNum = msg.page;
+      if (pdfDoc) {
+        await renderPdfPage();
+        showPdfStatus('Page ' + pdfPageNum);
+      }
+      break;
+
+    case 'pdf-unload':
+      strokes = [];
+      redraw();
+      closePdf();
+      break;
   }
 });
 
 function loadSnapshot(dataUrl) {
+  if (!dataUrl) return;
   const img = new Image();
   img.onload = () => {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
