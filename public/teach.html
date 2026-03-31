@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Teacher — Bearded Tutor</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #fff; }
+
+  #canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    touch-action: none;
+    cursor: crosshair;
+  }
+
+  #controls {
+    position: fixed;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 12px;
+    z-index: 10;
+  }
+
+  #controls button {
+    font-size: 1.2rem;
+    padding: 14px 28px;
+    border: 2px solid #333;
+    border-radius: 12px;
+    background: #fff;
+    color: #333;
+    font-weight: 600;
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+    transition: background 0.15s, color 0.15s;
+  }
+
+  #controls button:active {
+    background: #333;
+    color: #fff;
+  }
+
+  #controls button.active {
+    background: #e74c3c;
+    color: #fff;
+    border-color: #e74c3c;
+  }
+
+  #pauseBtn.active {
+    background: #e74c3c;
+    color: #fff;
+    border-color: #e74c3c;
+  }
+</style>
+</head>
+<body>
+
+<canvas id="canvas"></canvas>
+
+<div id="controls">
+  <button id="pauseBtn">Pause</button>
+  <button id="revealBtn">Reveal</button>
+  <button id="undoBtn">Undo</button>
+  <button id="clearBtn">Clear</button>
+</div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+let strokes = [];       // Array of strokes; each stroke = [{x,y}, ...]
+let currentStroke = [];
+let drawing = false;
+let paused = false;
+
+// --- Hi-DPI support ---
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = window.innerWidth * dpr;
+  canvas.height = window.innerHeight * dpr;
+  canvas.style.width = window.innerWidth + 'px';
+  canvas.style.height = window.innerHeight + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  redraw();
+}
+window.addEventListener('resize', resize);
+resize();
+
+// --- Drawing helpers ---
+function drawStroke(points) {
+  if (points.length < 2) return;
+  ctx.beginPath();
+  ctx.moveTo(points[0].x, points[0].y);
+  for (let i = 1; i < points.length; i++) {
+    ctx.lineTo(points[i].x, points[i].y);
+  }
+  ctx.strokeStyle = '#000';
+  ctx.lineWidth = 2.5;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.stroke();
+}
+
+function redraw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  for (const s of strokes) drawStroke(s);
+}
+
+// --- Pointer events (Apple Pencil compatible) ---
+canvas.addEventListener('pointerdown', (e) => {
+  // Only draw with pen or primary mouse button
+  if (e.pointerType === 'touch') return; // reject finger on iPad
+  e.preventDefault();
+  drawing = true;
+  currentStroke = [{ x: e.clientX, y: e.clientY }];
+  canvas.setPointerCapture(e.pointerId);
+});
+
+canvas.addEventListener('pointermove', (e) => {
+  if (!drawing) return;
+  e.preventDefault();
+  const pt = { x: e.clientX, y: e.clientY };
+  currentStroke.push(pt);
+  // Draw incremental segment
+  if (currentStroke.length >= 2) {
+    const prev = currentStroke[currentStroke.length - 2];
+    ctx.beginPath();
+    ctx.moveTo(prev.x, prev.y);
+    ctx.lineTo(pt.x, pt.y);
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = 2.5;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.stroke();
+  }
+});
+
+canvas.addEventListener('pointerup', (e) => {
+  if (!drawing) return;
+  e.preventDefault();
+  drawing = false;
+  if (currentStroke.length > 1) {
+    strokes.push(currentStroke);
+    sendStroke(currentStroke);
+  }
+  currentStroke = [];
+});
+
+canvas.addEventListener('pointercancel', () => {
+  drawing = false;
+  currentStroke = [];
+});
+
+// --- WebSocket ---
+const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+const ws = new WebSocket(`${proto}://${location.host}`);
+
+ws.addEventListener('open', () => {
+  ws.send(JSON.stringify({ type: 'register', role: 'teacher' }));
+});
+
+ws.addEventListener('message', (e) => {
+  const msg = JSON.parse(e.data);
+  if (msg.type === 'paused') {
+    paused = true;
+    pauseBtn.classList.add('active');
+    pauseBtn.textContent = 'Paused';
+  }
+});
+
+function sendStroke(points) {
+  if (ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: 'stroke', points }));
+  }
+}
+
+function getSnapshot() {
+  // Export at display resolution
+  return canvas.toDataURL('image/png');
+}
+
+// --- Buttons ---
+const pauseBtn = document.getElementById('pauseBtn');
+const revealBtn = document.getElementById('revealBtn');
+const undoBtn = document.getElementById('undoBtn');
+const clearBtn = document.getElementById('clearBtn');
+
+pauseBtn.addEventListener('click', () => {
+  if (!paused) {
+    paused = true;
+    pauseBtn.classList.add('active');
+    pauseBtn.textContent = 'Paused';
+    ws.send(JSON.stringify({ type: 'pause', snapshot: getSnapshot() }));
+  }
+});
+
+revealBtn.addEventListener('click', () => {
+  paused = false;
+  pauseBtn.classList.remove('active');
+  pauseBtn.textContent = 'Pause';
+  ws.send(JSON.stringify({ type: 'reveal', snapshot: getSnapshot() }));
+});
+
+undoBtn.addEventListener('click', () => {
+  if (strokes.length === 0) return;
+  strokes.pop();
+  redraw();
+  ws.send(JSON.stringify({ type: 'undo' }));
+});
+
+clearBtn.addEventListener('click', () => {
+  strokes = [];
+  redraw();
+  ws.send(JSON.stringify({ type: 'clear' }));
+});
+</script>
+</body>
+</html>
