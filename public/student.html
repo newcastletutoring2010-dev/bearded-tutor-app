@@ -72,15 +72,16 @@ window.addEventListener('resize', resize);
 resize();
 
 // --- Drawing ---
-function drawStroke(points) {
-  if (points.length < 2) return;
+function drawStroke(stroke) {
+  const pts = stroke.points || stroke;
+  if (pts.length < 2) return;
   ctx.beginPath();
-  ctx.moveTo(points[0].x, points[0].y);
-  for (let i = 1; i < points.length; i++) {
-    ctx.lineTo(points[i].x, points[i].y);
+  ctx.moveTo(pts[0].x, pts[0].y);
+  for (let i = 1; i < pts.length; i++) {
+    ctx.lineTo(pts[i].x, pts[i].y);
   }
-  ctx.strokeStyle = '#000';
-  ctx.lineWidth = 2.5;
+  ctx.strokeStyle = stroke.color || '#000';
+  ctx.lineWidth = stroke.size || 2.5;
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
   ctx.stroke();
@@ -124,8 +125,9 @@ ws.addEventListener('message', (e) => {
 
     case 'stroke':
       if (paused) return;
-      strokes.push(msg.points);
-      drawStroke(msg.points);
+      const stroke = { points: msg.points, color: msg.color, size: msg.size };
+      strokes.push(stroke);
+      drawStroke(stroke);
       break;
 
     case 'full-redraw':

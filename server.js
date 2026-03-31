@@ -64,9 +64,9 @@ wss.on('connection', (ws) => {
 
       case 'stroke':
         // Teacher is drawing — store and forward if not paused
-        strokes.push(msg.points);
+        strokes.push({ points: msg.points, color: msg.color, size: msg.size });
         if (!paused) {
-          broadcast({ type: 'stroke', points: msg.points }, 'teacher');
+          broadcast({ type: 'stroke', points: msg.points, color: msg.color, size: msg.size }, 'teacher');
         }
         break;
 
