@@ -302,6 +302,7 @@ let strokes = [];
 let currentStroke = [];
 let drawing = false;
 let paused = false;
+let holdTimer = null;
 
 // --- PDF state ---
 let pdfDoc = null;
@@ -376,6 +377,11 @@ function redraw() {
 canvas.addEventListener('pointerdown', (e) => {
   if (e.pointerType === 'touch') return;
   e.preventDefault();
+  // Cancel any pending shape recognition — pen is back down
+  if (holdTimer !== null) {
+    clearTimeout(holdTimer);
+    holdTimer = null;
+  }
   drawing = true;
   currentStroke = [{ x: e.clientX, y: e.clientY }];
   canvas.setPointerCapture(e.pointerId);
@@ -408,6 +414,11 @@ canvas.addEventListener('pointerup', (e) => {
     strokes.push(stroke);
     sendStroke(stroke);
     saveAnnotations();
+    // Start 1-second hold timer for shape recognition
+    holdTimer = setTimeout(() => {
+      holdTimer = null;
+      attemptShapeRecognition();
+    }, 1000);
   }
   currentStroke = [];
 });
@@ -733,6 +744,242 @@ async function loadAnnotations() {
   } catch (err) {
     console.error('Failed to load annotations:', err);
   }
+}
+
+// =====================================================
+// SHAPE RECOGNITION (Draw and Hold)
+// =====================================================
+
+function ptDist(a, b) {
+  return Math.hypot(b.x - a.x, b.y - a.y);
+}
+
+function arcLength(pts) {
+  let len = 0;
+  for (let i = 1; i < pts.length; i++) len += ptDist(pts[i - 1], pts[i]);
+  return len;
+}
+
+// Resample stroke to n evenly-spaced points along its arc
+function resample(pts, n) {
+  const total = arcLength(pts);
+  if (total === 0 || pts.length < 2) return pts;
+  const step = total / (n - 1);
+  const out = [{ ...pts[0] }];
+  let travelled = 0;
+  let pi = 0;
+  for (let i = 1; i < n - 1; i++) {
+    const target = i * step;
+    while (pi < pts.length - 2) {
+      const seg = ptDist(pts[pi], pts[pi + 1]);
+      if (travelled + seg >= target) break;
+      travelled += seg;
+      pi++;
+    }
+    const seg = ptDist(pts[pi], pts[pi + 1]);
+    const t = seg === 0 ? 0 : (target - travelled) / seg;
+    out.push({
+      x: pts[pi].x + t * (pts[pi + 1].x - pts[pi].x),
+      y: pts[pi].y + t * (pts[pi + 1].y - pts[pi].y),
+    });
+  }
+  out.push({ ...pts[pts.length - 1] });
+  return out;
+}
+
+// Distance from point p to line segment a→b
+function distToSegment(p, a, b) {
+  const dx = b.x - a.x, dy = b.y - a.y;
+  const len2 = dx * dx + dy * dy;
+  if (len2 === 0) return ptDist(p, a);
+  const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2));
+  return ptDist(p, { x: a.x + t * dx, y: a.y + t * dy });
+}
+
+// --- Detectors ---
+
+function detectLine(pts) {
+  const first = pts[0], last = pts[pts.length - 1];
+  const chord = ptDist(first, last);
+  if (chord < 30) return null;
+  const arc = arcLength(pts);
+  const maxDev = Math.max(...pts.map(p => distToSegment(p, first, last)));
+  if (maxDev < 0.08 * chord && arc < 1.3 * chord) {
+    return { type: 'line', x1: first.x, y1: first.y, x2: last.x, y2: last.y };
+  }
+  return null;
+}
+
+function detectEllipse(pts) {
+  const n = pts.length;
+  const cx = pts.reduce((s, p) => s + p.x, 0) / n;
+  const cy = pts.reduce((s, p) => s + p.y, 0) / n;
+  const radii = pts.map(p => ptDist(p, { x: cx, y: cy }));
+  const meanR = radii.reduce((a, b) => a + b, 0) / n;
+  if (meanR < 20) return null;
+  const stdR = Math.sqrt(radii.reduce((s, r) => s + (r - meanR) ** 2, 0) / n);
+  const closedDist = ptDist(pts[0], pts[pts.length - 1]);
+  const isClosed = closedDist < 0.45 * meanR * 2;
+  if (stdR / meanR < 0.22 && isClosed) {
+    const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
+    return {
+      type: 'ellipse',
+      cx, cy,
+      rx: (Math.max(...xs) - Math.min(...xs)) / 2,
+      ry: (Math.max(...ys) - Math.min(...ys)) / 2,
+    };
+  }
+  return null;
+}
+
+// Find corner indices in a resampled stroke using angle-change peaks
+function findCorners(sampled, minAngle = 0.55) {
+  const corners = [];
+  for (let i = 2; i < sampled.length - 2; i++) {
+    const a = sampled[i - 2], b = sampled[i], c = sampled[i + 2];
+    const ax = b.x - a.x, ay = b.y - a.y;
+    const bx = c.x - b.x, by = c.y - b.y;
+    const dot = ax * bx + ay * by;
+    const cross = Math.abs(ax * by - ay * bx);
+    const angle = Math.atan2(cross, dot);
+    corners.push({ i, angle });
+  }
+  // Find local maxima above threshold
+  const peaks = [];
+  for (let j = 1; j < corners.length - 1; j++) {
+    const { i, angle } = corners[j];
+    if (angle > minAngle &&
+        angle >= corners[j - 1].angle &&
+        angle >= corners[j + 1].angle) {
+      // Suppress nearby peaks (within 5 indices)
+      if (peaks.length === 0 || i - peaks[peaks.length - 1].i > 5) {
+        peaks.push({ i, angle });
+      }
+    }
+  }
+  return peaks.map(p => sampled[p.i]);
+}
+
+function detectPolygon(pts, expectedCorners) {
+  const arc = arcLength(pts);
+  const closedDist = ptDist(pts[0], pts[pts.length - 1]);
+  if (closedDist > 0.3 * arc) return null; // not closed enough
+
+  const sampled = resample(pts, 64);
+  const corners = findCorners(sampled);
+  if (Math.abs(corners.length - expectedCorners) > 1) return null;
+  return corners.length >= 2 ? corners : null;
+}
+
+// --- Shape point generators ---
+
+function linePoints(s) {
+  return [{ x: s.x1, y: s.y1 }, { x: s.x2, y: s.y2 }];
+}
+
+function ellipsePoints(s, n = 80) {
+  const pts = [];
+  for (let i = 0; i <= n; i++) {
+    const a = (i / n) * 2 * Math.PI;
+    pts.push({ x: s.cx + s.rx * Math.cos(a), y: s.cy + s.ry * Math.sin(a) });
+  }
+  return pts;
+}
+
+function rectPoints(corners) {
+  // Fit a clean axis-aligned rectangle to the bounding box of detected corners
+  const xs = corners.map(p => p.x), ys = corners.map(p => p.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  return [
+    { x: minX, y: minY }, { x: maxX, y: minY },
+    { x: maxX, y: maxY }, { x: minX, y: maxY },
+    { x: minX, y: minY }, // close
+  ];
+}
+
+function trianglePoints(corners) {
+  // Use up to 3 corners; close the shape
+  const tri = corners.slice(0, 3);
+  return [...tri, tri[0]];
+}
+
+// --- Flash animation on snap ---
+function flashSnap(stroke) {
+  const pts = stroke.points;
+  if (pts.length < 2) return;
+  const start = performance.now();
+  const duration = 350;
+  function frame(now) {
+    const t = Math.min((now - start) / duration, 1);
+    const alpha = 0.65 * (1 - t);
+    if (alpha <= 0) { redraw(); return; }
+    redraw();
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = stroke.size + 6;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.stroke();
+    ctx.restore();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+}
+
+// --- Main recognition entry point ---
+function attemptShapeRecognition() {
+  if (strokes.length === 0) return;
+  const stroke = strokes[strokes.length - 1];
+  const pts = stroke.points;
+  if (!pts || pts.length < 6) return;
+
+  let snappedPoints = null;
+
+  // 1. Straight line (most specific — check first)
+  const line = detectLine(pts);
+  if (line) {
+    snappedPoints = linePoints(line);
+  }
+
+  // 2. Circle / ellipse
+  if (!snappedPoints) {
+    const ellipse = detectEllipse(pts);
+    if (ellipse) snappedPoints = ellipsePoints(ellipse);
+  }
+
+  // 3. Triangle
+  if (!snappedPoints) {
+    const triCorners = detectPolygon(pts, 3);
+    if (triCorners) snappedPoints = trianglePoints(triCorners);
+  }
+
+  // 4. Rectangle / square
+  if (!snappedPoints) {
+    const rectCorners = detectPolygon(pts, 4);
+    if (rectCorners) snappedPoints = rectPoints(rectCorners);
+  }
+
+  if (!snappedPoints) return; // No confident match — keep freehand
+
+  // Replace last stroke in-place
+  const snapped = { points: snappedPoints, color: stroke.color, size: stroke.size };
+  strokes[strokes.length - 1] = snapped;
+  redraw();
+  flashSnap(snapped);
+
+  // Update server and students: undo freehand, send perfect shape
+  if (ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: 'undo' }));
+    ws.send(JSON.stringify({ type: 'stroke', points: snapped.points, color: snapped.color, size: snapped.size }));
+  }
+
+  // Persist updated annotations
+  saveAnnotations();
 }
 
 // --- Swipe navigation for PDF pages ---
