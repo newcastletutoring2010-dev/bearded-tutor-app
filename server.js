@@ -145,6 +145,9 @@ let paused = false;
 // --- PDF State (shared between teacher/students) ---
 let currentPdf = { student: null, filename: null, page: 1, totalPages: 0 };
 
+// --- Viewport State ---
+let currentViewport = { zoom: 1, panX: 0, panY: 0 };
+
 function broadcast(data, senderRole) {
   const msg = JSON.stringify(data);
   for (const client of wss.clients) {
@@ -181,6 +184,7 @@ wss.on('connection', (ws) => {
             revealedImage,
             paused,
             currentPdf,
+            currentViewport,
           }));
         }
         break;
@@ -251,6 +255,13 @@ wss.on('connection', (ws) => {
           type: 'pdf-page',
           page: msg.page,
         }, 'teacher');
+        break;
+
+      case 'viewport':
+        currentViewport = { zoom: msg.zoom, panX: msg.panX, panY: msg.panY };
+        if (!paused) {
+          broadcast({ type: 'viewport', zoom: msg.zoom, panX: msg.panX, panY: msg.panY }, 'teacher');
+        }
         break;
 
       case 'pdf-unload':

@@ -74,12 +74,23 @@
     pointer-events: none;
   }
   #pdfStatus.visible { opacity: 1; }
+
+  /* Receives the same CSS zoom/pan transform broadcast by the teacher */
+  #canvasWrap {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    transform-origin: 0 0;
+    transition: transform 0.05s linear;
+  }
 </style>
 </head>
 <body>
 
-<canvas id="pdfCanvas"></canvas>
-<canvas id="canvas"></canvas>
+<div id="canvasWrap">
+  <canvas id="pdfCanvas"></canvas>
+  <canvas id="canvas"></canvas>
+</div>
 <div id="status"></div>
 <div id="pdfStatus"></div>
 
@@ -95,6 +106,13 @@ const pdfStatusEl = document.getElementById('pdfStatus');
 
 let strokes = [];
 let paused = false;
+
+// --- Viewport (mirrors teacher zoom/pan) ---
+const canvasWrap = document.getElementById('canvasWrap');
+
+function applyViewport(z, px, py) {
+  canvasWrap.style.transform = `translate(${px}px, ${py}px) scale(${z})`;
+}
 
 // --- PDF state ---
 let pdfDoc = null;
@@ -234,6 +252,10 @@ ws.addEventListener('message', async (e) => {
         loadSnapshot(msg.revealedImage);
         showStatus('Paused', 'paused');
       }
+      // Apply the teacher's current viewport immediately
+      if (msg.currentViewport) {
+        applyViewport(msg.currentViewport.zoom, msg.currentViewport.panX, msg.currentViewport.panY);
+      }
       // If a PDF is currently loaded on teacher side
       if (msg.currentPdf && msg.currentPdf.student && msg.currentPdf.filename) {
         await loadPdf(msg.currentPdf.student, msg.currentPdf.filename);
@@ -302,6 +324,11 @@ ws.addEventListener('message', async (e) => {
       strokes = [];
       redraw();
       closePdf();
+      break;
+
+    case 'viewport':
+      // Only follow teacher zoom/pan when live — freeze position when paused
+      if (!paused) applyViewport(msg.zoom, msg.panX, msg.panY);
       break;
   }
 });

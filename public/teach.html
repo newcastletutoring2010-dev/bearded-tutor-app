@@ -402,6 +402,7 @@ function applyTransform() {
   canvasWrap.style.transform = `translate(${panX}px, ${panY}px) scale(${zoom})`;
   const notDefault = zoom !== 1 || panX !== 0 || panY !== 0;
   document.getElementById('resetZoomRow').style.display = notDefault ? '' : 'none';
+  sendViewport();
 }
 
 let zoomIndicatorTimer = null;
@@ -410,6 +411,17 @@ function showZoomIndicator() {
   zoomIndicatorEl.style.opacity = '1';
   clearTimeout(zoomIndicatorTimer);
   zoomIndicatorTimer = setTimeout(() => { zoomIndicatorEl.style.opacity = '0'; }, 2000);
+}
+
+// Send the current viewport to students (throttled to ~30 fps during gestures)
+let lastViewportSend = 0;
+function sendViewport() {
+  const now = Date.now();
+  if (now - lastViewportSend < 32) return;
+  lastViewportSend = now;
+  if (ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: 'viewport', zoom, panX, panY }));
+  }
 }
 
 // --- Drawing helpers ---
@@ -1135,6 +1147,7 @@ canvasWrap.addEventListener('touchcancel', (e) => {
 // --- Reset zoom button ---
 document.getElementById('resetZoomBtn').addEventListener('click', () => {
   zoom = 1; panX = 0; panY = 0;
+  lastViewportSend = 0; // bypass throttle so student sees reset immediately
   applyTransform();
   showZoomIndicator();
 });
