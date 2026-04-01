@@ -294,13 +294,23 @@ wss.on('connection', (ws) => {
                   data: msg.image, // base64 string (no data: prefix)
                 },
               },
-              'Read the mathematical equation in this image. Calculate the answer. Respond ONLY with a JSON object in this format: {"equation": "2+2", "answer": "4"}\nDo not include any other text or markdown.',
+              'You are an expert at reading messy handwritten math. Read the equation in this image. Make your best guess even if it is sloppy. Calculate the answer. You MUST respond with ONLY a raw JSON object and no other text: {"equation": "your guess", "answer": "your calculation"}.',
             ]);
 
             const text = result.response.text().trim();
-            // Strip markdown code fences if present
-            const clean = text.replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim();
-            const parsed = JSON.parse(clean);
+            // Robust extraction: find the first { and last } to isolate JSON
+            const firstBrace = text.indexOf('{');
+            const lastBrace = text.lastIndexOf('}');
+            if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) {
+              throw new Error('Could not parse math');
+            }
+            const jsonStr = text.slice(firstBrace, lastBrace + 1);
+            let parsed;
+            try {
+              parsed = JSON.parse(jsonStr);
+            } catch {
+              throw new Error('Could not parse math');
+            }
 
             ws.send(JSON.stringify({
               type: 'calculate_result',
