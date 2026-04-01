@@ -255,6 +255,25 @@
     touch-action: none;
   }
 
+  /* --- Calc indicator (loading / error) --- */
+  #calcIndicator {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    padding: 10px 20px;
+    border-radius: 10px;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 0.9rem;
+    font-weight: 600;
+    z-index: 30;
+    opacity: 0;
+    transition: opacity 0.3s;
+    pointer-events: none;
+  }
+  #calcIndicator.loading { background: rgba(33,150,243,0.85); color: #fff; opacity: 1; }
+  #calcIndicator.error   { background: rgba(231,76,60,0.85); color: #fff; opacity: 1; }
+
   /* --- Zoom indicator --- */
   #zoomIndicator {
     position: fixed;
@@ -281,6 +300,7 @@
   <canvas id="canvas"></canvas>
 </div>
 <div id="zoomIndicator"></div>
+<div id="calcIndicator"></div>
 
 <div id="brushControls">
   <div class="brush-row" id="sizeRow"></div>
@@ -426,6 +446,18 @@ function sendViewport() {
 
 // --- Drawing helpers ---
 function drawStroke(stroke) {
+  // Handle text strokes (from calculator answers)
+  if (stroke.text) {
+    const pt = stroke.points[0];
+    ctx.save();
+    ctx.font = `bold ${stroke.size}px -apple-system, BlinkMacSystemFont, sans-serif`;
+    ctx.fillStyle = stroke.color || '#000';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(stroke.text, pt.x, pt.y);
+    ctx.restore();
+    return;
+  }
+
   const pts = stroke.points || stroke;
   if (pts.length < 2) return;
   ctx.beginPath();
@@ -486,10 +518,14 @@ canvas.addEventListener('pointerup', (e) => {
     strokes.push(stroke);
     sendStroke(stroke);
     saveAnnotations();
-    // Start 1-second hold timer for shape recognition
+    // Start 1-second hold timer for shape recognition OR calculator
     holdTimer = setTimeout(() => {
       holdTimer = null;
-      attemptShapeRecognition();
+      if (detectEqualsSign(stroke)) {
+        attemptCalculation();
+      } else {
+        attemptShapeRecognition();
+      }
     }, 1000);
   }
   currentStroke = [];
@@ -515,6 +551,16 @@ ws.addEventListener('message', async (e) => {
     paused = true;
     pauseBtn.classList.add('active');
     pauseBtn.textContent = 'Paused';
+  }
+
+  if (msg.type === 'calculate_result') {
+    hideCalcIndicator();
+    drawAnswerOnCanvas(msg.answer, msg.x, msg.y);
+  }
+
+  if (msg.type === 'calculate_error') {
+    showCalcIndicator('Could not calculate', 'error');
+    setTimeout(hideCalcIndicator, 2000);
   }
 
   if (msg.type === 'init') {
@@ -1154,6 +1200,173 @@ function attemptShapeRecognition() {
   if (ws.readyState === 1) {
     ws.send(JSON.stringify({ type: 'undo' }));
     ws.send(JSON.stringify({ type: 'stroke', points: snapped.points, color: snapped.color, size: snapped.size }));
+  }
+
+  saveAnnotations();
+}
+
+// =====================================================
+// SMART CALCULATOR (Gemini API)
+// =====================================================
+
+const calcIndicatorEl = document.getElementById('calcIndicator');
+let calcIndicatorTimer = null;
+
+function showCalcIndicator(text, cls) {
+  calcIndicatorEl.textContent = text;
+  calcIndicatorEl.className = cls;
+  clearTimeout(calcIndicatorTimer);
+}
+
+function hideCalcIndicator() {
+  calcIndicatorEl.className = '';
+  calcIndicatorEl.style.opacity = '0';
+}
+
+// Detect if the last stroke looks like an equals sign (≈ two short horizontal lines)
+function detectEqualsSign(stroke) {
+  const pts = stroke.points;
+  if (!pts || pts.length < 4) return false;
+
+  // Check if the stroke is roughly horizontal and short
+  const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
+  const w = Math.max(...xs) - Math.min(...xs);
+  const h = Math.max(...ys) - Math.min(...ys);
+
+  // An equals sign stroke is much wider than tall
+  if (w < 15 || h > w * 0.5) return false;
+
+  // Also check the previous stroke — equals sign needs two horizontal lines
+  if (strokes.length < 2) return false;
+  const prev = strokes[strokes.length - 2];
+  const prevPts = prev.points;
+  if (!prevPts || prevPts.length < 4) return false;
+
+  const pxs = prevPts.map(p => p.x), pys = prevPts.map(p => p.y);
+  const pw = Math.max(...pxs) - Math.min(...pxs);
+  const ph = Math.max(...pys) - Math.min(...pys);
+  if (pw < 15 || ph > pw * 0.5) return false;
+
+  // The two strokes should be roughly aligned horizontally and close vertically
+  const curMidX = (Math.min(...xs) + Math.max(...xs)) / 2;
+  const prevMidX = (Math.min(...pxs) + Math.max(...pxs)) / 2;
+  const curMidY = (Math.min(...ys) + Math.max(...ys)) / 2;
+  const prevMidY = (Math.min(...pys) + Math.max(...pys)) / 2;
+
+  const hOverlap = Math.abs(curMidX - prevMidX) < Math.max(w, pw) * 0.7;
+  const vGap = Math.abs(curMidY - prevMidY);
+  const avgW = (w + pw) / 2;
+  const closeVertically = vGap > 3 && vGap < avgW * 1.5;
+
+  return hOverlap && closeVertically;
+}
+
+// Capture a region of the canvas containing recent strokes and send to Gemini
+function attemptCalculation() {
+  if (strokes.length < 3) return; // need at least: something + equals sign (2 strokes)
+
+  showCalcIndicator('Calculating...', 'loading');
+
+  // Find the bounding box of recent strokes (up to last 20 — enough for a full equation)
+  const recentCount = Math.min(strokes.length, 20);
+  const recentStrokes = strokes.slice(strokes.length - recentCount);
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const s of recentStrokes) {
+    for (const p of (s.points || [])) {
+      if (p.x < minX) minX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y > maxY) maxY = p.y;
+    }
+  }
+
+  // Add padding
+  const pad = 40;
+  minX = Math.max(0, minX - pad);
+  minY = Math.max(0, minY - pad);
+  maxX = maxX + pad;
+  maxY = maxY + pad;
+  const regionW = maxX - minX;
+  const regionH = maxY - minY;
+
+  if (regionW < 20 || regionH < 10) {
+    hideCalcIndicator();
+    return;
+  }
+
+  // Render the region to an offscreen canvas
+  const offscreen = document.createElement('canvas');
+  offscreen.width = regionW * 2;
+  offscreen.height = regionH * 2;
+  const offCtx = offscreen.getContext('2d');
+  offCtx.fillStyle = '#ffffff';
+  offCtx.fillRect(0, 0, offscreen.width, offscreen.height);
+  offCtx.scale(2, 2);
+  offCtx.translate(-minX, -minY);
+
+  for (const s of recentStrokes) {
+    const pts = s.points || [];
+    if (pts.length < 2) continue;
+    offCtx.beginPath();
+    offCtx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length; i++) offCtx.lineTo(pts[i].x, pts[i].y);
+    offCtx.strokeStyle = s.color || '#000';
+    offCtx.lineWidth = s.size || 2.5;
+    offCtx.lineCap = 'round';
+    offCtx.lineJoin = 'round';
+    offCtx.stroke();
+  }
+
+  // Get base64 (strip the data:image/png;base64, prefix)
+  const dataUrl = offscreen.toDataURL('image/png');
+  const base64 = dataUrl.split(',')[1];
+
+  // Position to place the answer: just right of the equals sign
+  const lastStroke = strokes[strokes.length - 1];
+  const lastPts = lastStroke.points || [];
+  const answerX = Math.max(...lastPts.map(p => p.x)) + 15;
+  const answerY = (Math.min(...lastPts.map(p => p.y)) + Math.max(...lastPts.map(p => p.y))) / 2;
+
+  if (ws.readyState === 1) {
+    ws.send(JSON.stringify({
+      type: 'calculate_math',
+      image: base64,
+      x: answerX,
+      y: answerY,
+    }));
+  }
+}
+
+// Draw the answer text on the canvas as a stroke-based text
+function drawAnswerOnCanvas(answer, x, y) {
+  // Use canvas fillText to render, then capture as a visual element
+  // We'll render the text and also send it as a stroke to students
+  const fontSize = Math.max(20, currentSize * 5);
+
+  ctx.save();
+  ctx.font = `bold ${fontSize}px -apple-system, BlinkMacSystemFont, sans-serif`;
+  ctx.fillStyle = currentColor;
+  ctx.textBaseline = 'middle';
+  ctx.fillText(answer, x, y);
+  ctx.restore();
+
+  // Capture the text as a special "text stroke" so it syncs to students and persists
+  const textStroke = {
+    points: [{ x, y }],
+    color: currentColor,
+    size: fontSize,
+    text: answer,
+  };
+  strokes.push(textStroke);
+
+  if (ws.readyState === 1) {
+    ws.send(JSON.stringify({
+      type: 'stroke',
+      points: textStroke.points,
+      color: textStroke.color,
+      size: textStroke.size,
+      text: textStroke.text,
+    }));
   }
 
   saveAnnotations();

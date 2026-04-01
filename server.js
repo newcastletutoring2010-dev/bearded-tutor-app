@@ -4,6 +4,7 @@ const { WebSocketServer } = require('ws');
 const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 const app = express();
 const server = http.createServer(app);
@@ -192,12 +193,15 @@ wss.on('connection', (ws) => {
         }));
         break;
 
-      case 'stroke':
-        strokes.push({ points: msg.points, color: msg.color, size: msg.size });
+      case 'stroke': {
+        const strokeData = { points: msg.points, color: msg.color, size: msg.size };
+        if (msg.text) strokeData.text = msg.text;
+        strokes.push(strokeData);
         if (!paused) {
-          broadcast({ type: 'stroke', points: msg.points, color: msg.color, size: msg.size }, 'teacher');
+          broadcast({ type: 'stroke', ...strokeData }, 'teacher');
         }
         break;
+      }
 
       case 'undo':
         strokes.pop();
@@ -271,6 +275,48 @@ wss.on('connection', (ws) => {
         currentPdf = { student: null, filename: null, page: 1, totalPages: 0 };
         strokes = [];
         broadcast({ type: 'pdf-unload' }, 'teacher');
+        break;
+
+      // --- Smart calculator via Gemini ---
+      case 'calculate_math':
+        (async () => {
+          try {
+            const apiKey = process.env.GEMINI_API_KEY;
+            if (!apiKey) throw new Error('GEMINI_API_KEY not set');
+
+            const genAI = new GoogleGenerativeAI(apiKey);
+            const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+
+            const result = await model.generateContent([
+              {
+                inlineData: {
+                  mimeType: 'image/png',
+                  data: msg.image, // base64 string (no data: prefix)
+                },
+              },
+              'Read the mathematical equation in this image. Calculate the answer. Respond ONLY with a JSON object in this format: {"equation": "2+2", "answer": "4"}\nDo not include any other text or markdown.',
+            ]);
+
+            const text = result.response.text().trim();
+            // Strip markdown code fences if present
+            const clean = text.replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim();
+            const parsed = JSON.parse(clean);
+
+            ws.send(JSON.stringify({
+              type: 'calculate_result',
+              equation: parsed.equation,
+              answer: String(parsed.answer),
+              x: msg.x,
+              y: msg.y,
+            }));
+          } catch (err) {
+            console.error('Gemini calculation error:', err.message);
+            ws.send(JSON.stringify({
+              type: 'calculate_error',
+              error: err.message,
+            }));
+          }
+        })();
         break;
     }
   });

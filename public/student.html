@@ -143,6 +143,18 @@ resize();
 
 // --- Drawing ---
 function drawStroke(stroke) {
+  // Handle text strokes (from calculator answers)
+  if (stroke.text) {
+    const pt = stroke.points[0];
+    ctx.save();
+    ctx.font = `bold ${stroke.size}px -apple-system, BlinkMacSystemFont, sans-serif`;
+    ctx.fillStyle = stroke.color || '#000';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(stroke.text, pt.x, pt.y);
+    ctx.restore();
+    return;
+  }
+
   const pts = stroke.points || stroke;
   if (pts.length < 2) return;
   ctx.beginPath();
