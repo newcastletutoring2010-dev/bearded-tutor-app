@@ -940,6 +940,13 @@ function detectCircle(pts) {
 
   if (ratio > 0.25) return null;
 
+  // Reject if 3 or more sharp corners are present — that's a polygon, not a circle.
+  // A real circle has 0 corners; squares have 4 (~90°), triangles have 3.
+  // 70° threshold: forgiving for circle hand-wobble, catches square corners reliably.
+  const corners = findSharpCorners(pts, 70);
+  console.log(`[circle] corners found at 70°: ${corners.length}`);
+  if (corners.length >= 3) return null;
+
   // Perfect circle: centroid as centre, meanR as radius
   return { cx, cy, rx: meanR, ry: meanR };
 }
