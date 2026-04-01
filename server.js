@@ -180,15 +180,16 @@ wss.on('connection', (ws) => {
     switch (msg.type) {
       case 'register':
         ws._role = msg.role;
-        if (msg.role === 'student') {
-          ws.send(JSON.stringify({
-            type: 'init',
-            revealedImage,
-            paused,
-            currentPdf,
-            currentViewport,
-          }));
-        }
+        // Send full current state to both students and teachers on connect.
+        // Teachers use it to restore strokes after a page refresh.
+        ws.send(JSON.stringify({
+          type: 'init',
+          strokes,
+          revealedImage,
+          paused,
+          currentPdf,
+          currentViewport,
+        }));
         break;
 
       case 'stroke':

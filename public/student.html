@@ -248,20 +248,27 @@ ws.addEventListener('message', async (e) => {
   switch (msg.type) {
     case 'init':
       paused = msg.paused;
-      if (paused && msg.revealedImage) {
-        loadSnapshot(msg.revealedImage);
-        showStatus('Paused', 'paused');
-      }
+      strokes = msg.strokes || [];
+
       // Apply the teacher's current viewport immediately
       if (msg.currentViewport) {
         applyViewport(msg.currentViewport.zoom, msg.currentViewport.panX, msg.currentViewport.panY);
       }
-      // If a PDF is currently loaded on teacher side
+
+      // If a PDF is currently loaded, render it first then draw strokes on top
       if (msg.currentPdf && msg.currentPdf.student && msg.currentPdf.filename) {
         await loadPdf(msg.currentPdf.student, msg.currentPdf.filename);
         pdfPageNum = msg.currentPdf.page || 1;
         await renderPdfPage();
         showPdfStatus(msg.currentPdf.student + ' / ' + msg.currentPdf.filename + ' — Page ' + pdfPageNum);
+      }
+
+      // If paused, show the frozen snapshot; otherwise draw the live strokes
+      if (paused && msg.revealedImage) {
+        loadSnapshot(msg.revealedImage);
+        showStatus('Paused', 'paused');
+      } else {
+        redraw();
       }
       break;
 

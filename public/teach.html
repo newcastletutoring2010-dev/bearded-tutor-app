@@ -508,12 +508,36 @@ ws.addEventListener('open', () => {
   ws.send(JSON.stringify({ type: 'register', role: 'teacher' }));
 });
 
-ws.addEventListener('message', (e) => {
+ws.addEventListener('message', async (e) => {
   const msg = JSON.parse(e.data);
+
   if (msg.type === 'paused') {
     paused = true;
     pauseBtn.classList.add('active');
     pauseBtn.textContent = 'Paused';
+  }
+
+  if (msg.type === 'init') {
+    // Restore strokes from server state (e.g. after a page refresh)
+    strokes = msg.strokes || [];
+    redraw();
+
+    // Restore paused state
+    if (msg.paused) {
+      paused = true;
+      pauseBtn.classList.add('active');
+      pauseBtn.textContent = 'Paused';
+    }
+
+    // Restore PDF display without sending pdf-load back to the server
+    if (msg.currentPdf && msg.currentPdf.student && msg.currentPdf.filename) {
+      await restorePdfDisplay(
+        msg.currentPdf.student,
+        msg.currentPdf.filename,
+        msg.currentPdf.page || 1,
+        msg.currentPdf.totalPages || 0
+      );
+    }
   }
 });
 
@@ -659,6 +683,32 @@ async function showStudentPdfs(student) {
     div.addEventListener('click', () => loadPdf(student, pdf));
     pickerContent.appendChild(div);
   }
+}
+
+// --- Restore PDF display after a page refresh (no WS messages sent) ---
+async function restorePdfDisplay(student, filename, page, totalPages) {
+  pdfStudent = student;
+  pdfFilename = filename;
+  pdfPageNum = page;
+
+  const url = `/uploads/${encodeURIComponent(student)}/${encodeURIComponent(filename)}`;
+  try {
+    pdfDoc = await pdfjsLib.getDocument(url).promise;
+  } catch (err) {
+    console.error('Failed to restore PDF:', err);
+    return;
+  }
+  pdfTotalPages = totalPages || pdfDoc.numPages;
+
+  pdfCanvas.style.display = 'block';
+  closePdfBtn.style.display = '';
+  pageNav.style.display = '';
+  annoRow.style.display = '';
+  pdfInfo.textContent = student + ' / ' + filename;
+
+  await renderPdfPage();
+  // Strokes already restored from init — just redraw them over the PDF
+  redraw();
 }
 
 // --- Load PDF ---
