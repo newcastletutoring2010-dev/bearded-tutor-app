@@ -971,15 +971,18 @@ function detectLine(pts) {
 }
 
 // --- Detector 2: Circle ---
-// No closed-stroke requirement — people rarely close a freehand circle perfectly.
-// Detects by low radial variance from the centroid (stdR / meanR < 0.25).
+// Uses bounding-box centre instead of point-average centroid so the
+// result is immune to drawing speed and point-density clustering.
 // Logs the variance ratio for every stroke so the threshold can be tuned.
 function detectCircle(pts) {
   if (pts.length < 20) return null;
 
   const n = pts.length;
-  const cx = pts.reduce((s, p) => s + p.x, 0) / n;
-  const cy = pts.reduce((s, p) => s + p.y, 0) / n;
+  const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
   const radii = pts.map(p => Math.hypot(p.x - cx, p.y - cy));
   const meanR = radii.reduce((a, b) => a + b, 0) / n;
   if (meanR < 15) return null;
