@@ -971,37 +971,68 @@ function detectLine(pts) {
 }
 
 // --- Detector 2: Circle ---
-// Uses bounding-box centre instead of point-average centroid so the
-// result is immune to drawing speed and point-density clustering.
-// Logs the variance ratio for every stroke so the threshold can be tuned.
+// Uses Kåsa's algebraic least-squares circle fit to find the true geometric
+// centre and radius. Works correctly for partial arcs and C-shapes because
+// it solves for the circle that best fits all points, regardless of how
+// much of the circumference was actually drawn.
+// After the fit, the same stdR / meanR < 0.25 variance check is applied.
 function detectCircle(pts) {
   if (pts.length < 20) return null;
 
   const n = pts.length;
-  const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
-  const minX = Math.min(...xs), maxX = Math.max(...xs);
-  const minY = Math.min(...ys), maxY = Math.max(...ys);
-  const cx = (minX + maxX) / 2;
-  const cy = (minY + maxY) / 2;
+
+  // --- Kåsa least-squares circle fit ---
+  // Minimises the algebraic distance  (x-cx)² + (y-cy)² - R²  over all points.
+  // Reduces to solving a 3×3 linear system  A·[a,b,c]ᵀ = d  where
+  //   cx = a/2,  cy = b/2,  R = sqrt(c + cx² + cy²).
+  let Sx = 0, Sy = 0, Sxx = 0, Syy = 0, Sxy = 0, Sxxx = 0, Syyy = 0, Sxxy = 0, Sxyy = 0;
+  for (const p of pts) {
+    const x2 = p.x * p.x, y2 = p.y * p.y;
+    Sx += p.x; Sy += p.y;
+    Sxx += x2; Syy += y2; Sxy += p.x * p.y;
+    Sxxx += x2 * p.x; Syyy += y2 * p.y;
+    Sxxy += x2 * p.y; Sxyy += p.x * y2;
+  }
+
+  // System:  | Sxx Sxy Sx |   | a |   | Sxxx+Sxyy |
+  //          | Sxy Syy Sy | × | b | = | Sxxy+Syyy |
+  //          | Sx  Sy  n  |   | c |   | Sxx +Syy  |
+  const A00 = Sxx, A01 = Sxy, A02 = Sx;
+  const A10 = Sxy, A11 = Syy, A12 = Sy;
+  const A20 = Sx,  A21 = Sy,  A22 = n;
+  const d0 = Sxxx + Sxyy, d1 = Sxxy + Syyy, d2 = Sxx + Syy;
+
+  // Solve via Cramer's rule
+  const detA = A00*(A11*A22 - A12*A21) - A01*(A10*A22 - A12*A20) + A02*(A10*A21 - A11*A20);
+  if (Math.abs(detA) < 1e-10) return null; // degenerate (collinear points)
+
+  const a = ( d0*(A11*A22 - A12*A21) - A01*(d1*A22 - A12*d2) + A02*(d1*A21 - A11*d2) ) / detA;
+  const b = ( A00*(d1*A22 - A12*d2) - d0*(A10*A22 - A12*A20) + A02*(A10*d2 - d1*A20) ) / detA;
+  const c = ( A00*(A11*d2 - d1*A21) - A01*(A10*d2 - d1*A20) + d0*(A10*A21 - A11*A20) ) / detA;
+
+  const cx = a / 2;
+  const cy = b / 2;
+  const rSq = c + cx * cx + cy * cy;
+  if (rSq <= 0) return null;
+  const fitR = Math.sqrt(rSq);
+  if (fitR < 15) return null;
+
+  // --- Radial variance check against the fitted centre ---
   const radii = pts.map(p => Math.hypot(p.x - cx, p.y - cy));
-  const meanR = radii.reduce((a, b) => a + b, 0) / n;
-  if (meanR < 15) return null;
+  const meanR = radii.reduce((s, r) => s + r, 0) / n;
   const stdR = Math.sqrt(radii.reduce((s, r) => s + (r - meanR) ** 2, 0) / n);
   const ratio = stdR / meanR;
 
-  console.log(`[circle] variance ratio: ${ratio.toFixed(3)} (snaps if < 0.25)  points: ${n}  meanR: ${Math.round(meanR)}px`);
+  console.log(`[circle] least-squares fit: ratio=${ratio.toFixed(3)} (snaps if < 0.25)  points=${n}  fitR=${Math.round(fitR)}px  cx=${Math.round(cx)} cy=${Math.round(cy)}`);
 
   if (ratio > 0.25) return null;
 
-  // Reject if 3 or more sharp corners are present — that's a polygon, not a circle.
-  // A real circle has 0 corners; squares have 4 (~90°), triangles have 3.
-  // 70° threshold: forgiving for circle hand-wobble, catches square corners reliably.
+  // Reject if 3+ sharp corners are present — that's a polygon, not a circle.
   const corners = findSharpCorners(pts, 70);
   console.log(`[circle] corners found at 70°: ${corners.length}`);
   if (corners.length >= 3) return null;
 
-  // Perfect circle: centroid as centre, meanR as radius
-  return { cx, cy, rx: meanR, ry: meanR };
+  return { cx, cy, rx: fitR, ry: fitR };
 }
 
 // --- Detector 3: Rectangle / Square ---
