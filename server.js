@@ -286,7 +286,7 @@ wss.on('connection', (ws) => {
             if (!apiKey) throw new Error('GEMINI_API_KEY not set');
 
             const genAI = new GoogleGenerativeAI(apiKey);
-            const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+            const model = genAI.getGenerativeModel({ model: 'gemini-3.1-flash-lite-preview' });
 
             console.log(`[calc] Received image: ${Math.round(msg.image.length / 1024)}KB base64`);
             console.log('[calc] Calling Gemini API...');
