@@ -141,6 +141,14 @@ function resize() {
 window.addEventListener('resize', resize);
 resize();
 
+// Denormalise a stroke received from the wire (0–1 → local pixel coords)
+function denormaliseStroke(s) {
+  const w = window.innerWidth, h = window.innerHeight;
+  const out = { points: s.points.map(p => ({ x: p.x * w, y: p.y * h })), color: s.color, size: s.size * h };
+  if (s.text) out.text = s.text;
+  return out;
+}
+
 // --- Drawing ---
 function drawStroke(stroke) {
   // Handle text strokes (from calculator answers)
@@ -260,7 +268,7 @@ ws.addEventListener('message', async (e) => {
   switch (msg.type) {
     case 'init':
       paused = msg.paused;
-      strokes = msg.strokes || [];
+      strokes = (msg.strokes || []).map(denormaliseStroke);
 
       // Apply the teacher's current viewport immediately
       if (msg.currentViewport) {
@@ -286,14 +294,14 @@ ws.addEventListener('message', async (e) => {
 
     case 'stroke':
       if (paused) return;
-      const stroke = { points: msg.points, color: msg.color, size: msg.size };
+      const stroke = denormaliseStroke({ points: msg.points, color: msg.color, size: msg.size, text: msg.text });
       strokes.push(stroke);
       drawStroke(stroke);
       break;
 
     case 'full-redraw':
       if (paused) return;
-      strokes = msg.strokes || [];
+      strokes = (msg.strokes || []).map(denormaliseStroke);
       redraw();
       break;
 
@@ -312,7 +320,7 @@ ws.addEventListener('message', async (e) => {
       paused = false;
       showStatus('Live', 'live');
       if (msg.strokes) {
-        strokes = msg.strokes;
+        strokes = msg.strokes.map(denormaliseStroke);
         redraw();
       } else if (msg.snapshot) {
         loadSnapshot(msg.snapshot);

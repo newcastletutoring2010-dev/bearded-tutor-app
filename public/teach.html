@@ -419,6 +419,23 @@ function toCanvas(clientX, clientY) {
   return { x: (clientX - panX) / zoom, y: (clientY - panY) / zoom };
 }
 
+// Normalise a stroke to 0–1 range for sending over the wire / saving to disk.
+// Coordinates divided by viewport dimensions; size divided by viewport height.
+function normaliseStroke(s) {
+  const w = window.innerWidth, h = window.innerHeight;
+  const out = { points: s.points.map(p => ({ x: p.x / w, y: p.y / h })), color: s.color, size: s.size / h };
+  if (s.text) out.text = s.text;
+  return out;
+}
+
+// Denormalise a stroke received from the wire / loaded from disk.
+function denormaliseStroke(s) {
+  const w = window.innerWidth, h = window.innerHeight;
+  const out = { points: s.points.map(p => ({ x: p.x * w, y: p.y * h })), color: s.color, size: s.size * h };
+  if (s.text) out.text = s.text;
+  return out;
+}
+
 function applyTransform() {
   canvasWrap.style.transform = `translate(${panX}px, ${panY}px) scale(${zoom})`;
   const notDefault = zoom !== 1 || panX !== 0 || panY !== 0;
@@ -571,7 +588,7 @@ ws.addEventListener('message', async (e) => {
 
   if (msg.type === 'init') {
     // Restore strokes from server state (e.g. after a page refresh)
-    strokes = msg.strokes || [];
+    strokes = (msg.strokes || []).map(denormaliseStroke);
     redraw();
 
     // Restore paused state
@@ -595,7 +612,8 @@ ws.addEventListener('message', async (e) => {
 
 function sendStroke(stroke) {
   if (ws.readyState === 1) {
-    ws.send(JSON.stringify({ type: 'stroke', points: stroke.points, color: stroke.color, size: stroke.size }));
+    const n = normaliseStroke(stroke);
+    ws.send(JSON.stringify({ type: 'stroke', points: n.points, color: n.color, size: n.size, text: n.text }));
   }
 }
 
@@ -896,7 +914,7 @@ async function saveAnnotations() {
     await fetch(`/api/annotations/${encodeURIComponent(pdfStudent)}/${encodeURIComponent(pdfFilename)}/${pdfPageNum}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ strokes }),
+      body: JSON.stringify({ strokes: strokes.map(normaliseStroke) }),
     });
   } catch (err) {
     console.error('Failed to save annotations:', err);
@@ -909,11 +927,11 @@ async function loadAnnotations() {
   try {
     const res = await fetch(`/api/annotations/${encodeURIComponent(pdfStudent)}/${encodeURIComponent(pdfFilename)}/${pdfPageNum}`);
     const data = await res.json();
-    strokes = data.strokes || [];
+    strokes = (data.strokes || []).map(denormaliseStroke);
     redraw();
-    // Send to students too
+    // Send to students too (normalised for the wire)
     if (strokes.length > 0) {
-      ws.send(JSON.stringify({ type: 'reveal', snapshot: null, strokes }));
+      ws.send(JSON.stringify({ type: 'reveal', snapshot: null, strokes: strokes.map(normaliseStroke) }));
     }
   } catch (err) {
     console.error('Failed to load annotations:', err);
@@ -1213,7 +1231,8 @@ function attemptShapeRecognition() {
 
   if (ws.readyState === 1) {
     ws.send(JSON.stringify({ type: 'undo' }));
-    ws.send(JSON.stringify({ type: 'stroke', points: snapped.points, color: snapped.color, size: snapped.size }));
+    const n = normaliseStroke(snapped);
+    ws.send(JSON.stringify({ type: 'stroke', points: n.points, color: n.color, size: n.size }));
   }
 
   saveAnnotations();
@@ -1462,13 +1481,8 @@ function drawAnswerOnCanvas(answer, x, y) {
   strokes.push(textStroke);
 
   if (ws.readyState === 1) {
-    ws.send(JSON.stringify({
-      type: 'stroke',
-      points: textStroke.points,
-      color: textStroke.color,
-      size: textStroke.size,
-      text: textStroke.text,
-    }));
+    const n = normaliseStroke(textStroke);
+    ws.send(JSON.stringify({ type: 'stroke', points: n.points, color: n.color, size: n.size, text: n.text }));
   }
 
   saveAnnotations();
