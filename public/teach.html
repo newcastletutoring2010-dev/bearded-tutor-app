@@ -1235,13 +1235,14 @@ function showCalcIndicator(text, cls) {
 
 function hideCalcIndicator() {
   calcIndicatorEl.className = '';
-  calcIndicatorEl.style.opacity = '0';
+  calcIndicatorEl.style.opacity = ''; // clear inline style so class-based opacity works next time
   calcWaiting = false;
   calcBtn.textContent = 'Calc';
 }
 
 // Capture strokes drawn in the last N seconds and send to Gemini
 function attemptCalculation() {
+  console.log('[calc] attemptCalculation called, strokes:', strokes.length);
   if (strokes.length === 0) return;
 
   calcWaiting = true;
@@ -1338,6 +1339,7 @@ function attemptCalculation() {
   }
 
   // Export as PNG at full 2x resolution
+  console.log('[calc] Capturing canvas region...', regionW, 'x', regionH, 'at 2x');
   const dataUrl = offscreen.toDataURL('image/png');
   const base64 = dataUrl.split(',')[1];
 
@@ -1345,6 +1347,8 @@ function attemptCalculation() {
   const answerX = maxX - pad + 15;
   const answerY = (minY + pad + maxY - pad) / 2;
 
+  console.log('[calc] WebSocket readyState:', ws.readyState);
+  console.log('[calc] Sending to server, image size:', base64.length, 'bytes');
   if (ws.readyState === 1) {
     ws.send(JSON.stringify({
       type: 'calculate_math',
@@ -1352,6 +1356,9 @@ function attemptCalculation() {
       x: answerX,
       y: answerY,
     }));
+  } else {
+    console.error('[calc] WebSocket not open — cannot send');
+    hideCalcIndicator();
   }
 }
 

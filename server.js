@@ -281,6 +281,7 @@ wss.on('connection', (ws) => {
       case 'calculate_math':
         (async () => {
           try {
+            console.log('[calc] Server received calculate_math');
             const apiKey = process.env.GEMINI_API_KEY;
             if (!apiKey) throw new Error('GEMINI_API_KEY not set');
 
@@ -288,6 +289,7 @@ wss.on('connection', (ws) => {
             const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
             console.log(`[calc] Received image: ${Math.round(msg.image.length / 1024)}KB base64`);
+            console.log('[calc] Calling Gemini API...');
 
             const result = await model.generateContent([
               {
@@ -347,7 +349,7 @@ wss.on('connection', (ws) => {
               y: msg.y,
             }));
           } catch (err) {
-            console.error('Gemini calculation error:', err.message);
+            console.error('[calc] Gemini error:', err.message, err.stack);
             ws.send(JSON.stringify({
               type: 'calculate_error',
               error: err.message,
