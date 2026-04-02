@@ -287,17 +287,20 @@ wss.on('connection', (ws) => {
             const genAI = new GoogleGenerativeAI(apiKey);
             const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
+            console.log(`[calc] Received image: ${Math.round(msg.image.length / 1024)}KB base64`);
+
             const result = await model.generateContent([
               {
                 inlineData: {
                   mimeType: 'image/png',
-                  data: msg.image, // base64 string (no data: prefix)
+                  data: msg.image,
                 },
               },
-              'You are an expert at reading messy handwritten math. Read the equation in this image. Make your best guess even if it is sloppy. Calculate the answer. You MUST respond with ONLY a raw JSON object and no other text: {"equation": "your guess", "answer": "your calculation"}.',
+              'This is a photograph of a handwritten mathematical equation on a whiteboard or paper. The handwriting may not be perfect. Please read the equation carefully and calculate the result. Common symbols used: x or × means multiply, ÷ or / means divide, + means add, - means subtract, ^ means power. Respond ONLY with a JSON object like this: {"equation": "4 x 4", "answer": "16"}\nDo not include any explanation, markdown, or other text.',
             ]);
 
             const text = result.response.text().trim();
+            console.log(`[calc] Raw Gemini response: ${text}`);
             // Robust extraction: find the first { and last } to isolate JSON
             const firstBrace = text.indexOf('{');
             const lastBrace = text.lastIndexOf('}');

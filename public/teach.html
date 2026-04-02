@@ -331,6 +331,7 @@
   <button id="revealBtn">Reveal</button>
   <button id="undoBtn">Undo</button>
   <button id="clearBtn">Clear</button>
+  <button id="calcBtn">Calc</button>
 </div>
 
 <!-- PDF Picker Modal -->
@@ -514,21 +515,15 @@ canvas.addEventListener('pointerup', (e) => {
   e.preventDefault();
   drawing = false;
   if (currentStroke.length > 1) {
-    const stroke = { points: currentStroke, color: currentColor, size: currentSize };
+    const stroke = { points: currentStroke, color: currentColor, size: currentSize, _time: Date.now() };
     strokes.push(stroke);
     sendStroke(stroke);
     saveAnnotations();
-    // Start 1-second hold timer for shape recognition OR calculator.
-    // detectEqualsSign checks the last TWO strokes, so if it matches,
-    // we skip shape recognition entirely to prevent the equals-sign
-    // strokes from being snapped to lines or circles.
+    // Start 1-second hold timer for shape recognition only.
+    // Calculator is now triggered by the dedicated Calc button.
     holdTimer = setTimeout(() => {
       holdTimer = null;
-      if (strokes.length >= 2 && detectEqualsSign(strokes[strokes.length - 1])) {
-        attemptCalculation();
-      } else {
-        attemptShapeRecognition();
-      }
+      attemptShapeRecognition();
     }, 1000);
   }
   currentStroke = [];
@@ -1221,68 +1216,52 @@ function attemptShapeRecognition() {
 // =====================================================
 
 const calcIndicatorEl = document.getElementById('calcIndicator');
-let calcIndicatorTimer = null;
+const calcBtn = document.getElementById('calcBtn');
+let calcWaiting = false;
 
 function showCalcIndicator(text, cls) {
   calcIndicatorEl.textContent = text;
   calcIndicatorEl.className = cls;
-  clearTimeout(calcIndicatorTimer);
 }
 
 function hideCalcIndicator() {
   calcIndicatorEl.className = '';
   calcIndicatorEl.style.opacity = '0';
+  calcWaiting = false;
+  calcBtn.textContent = 'Calc';
 }
 
-// Detect if the last stroke looks like an equals sign (≈ two short horizontal lines)
-function detectEqualsSign(stroke) {
-  const pts = stroke.points;
-  if (!pts || pts.length < 4) return false;
-
-  // Check if the stroke is roughly horizontal and short
-  const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
-  const w = Math.max(...xs) - Math.min(...xs);
-  const h = Math.max(...ys) - Math.min(...ys);
-
-  // An equals sign stroke is much wider than tall
-  if (w < 15 || h > w * 0.5) return false;
-
-  // Also check the previous stroke — equals sign needs two horizontal lines
-  if (strokes.length < 2) return false;
-  const prev = strokes[strokes.length - 2];
-  const prevPts = prev.points;
-  if (!prevPts || prevPts.length < 4) return false;
-
-  const pxs = prevPts.map(p => p.x), pys = prevPts.map(p => p.y);
-  const pw = Math.max(...pxs) - Math.min(...pxs);
-  const ph = Math.max(...pys) - Math.min(...pys);
-  if (pw < 15 || ph > pw * 0.5) return false;
-
-  // The two strokes should be roughly aligned horizontally and close vertically
-  const curMidX = (Math.min(...xs) + Math.max(...xs)) / 2;
-  const prevMidX = (Math.min(...pxs) + Math.max(...pxs)) / 2;
-  const curMidY = (Math.min(...ys) + Math.max(...ys)) / 2;
-  const prevMidY = (Math.min(...pys) + Math.max(...pys)) / 2;
-
-  const hOverlap = Math.abs(curMidX - prevMidX) < Math.max(w, pw) * 0.7;
-  const vGap = Math.abs(curMidY - prevMidY);
-  const avgW = (w + pw) / 2;
-  const closeVertically = vGap > 3 && vGap < avgW * 1.5;
-
-  return hOverlap && closeVertically;
-}
-
-// Capture a region of the canvas containing recent strokes and send to Gemini
+// Capture strokes drawn in the last N seconds and send to Gemini
 function attemptCalculation() {
-  if (strokes.length < 3) return; // need at least: something + equals sign (2 strokes)
+  if (strokes.length === 0) return;
 
+  calcWaiting = true;
+  calcBtn.textContent = '...';
   showCalcIndicator('Calculating...', 'loading');
 
-  // Find the bounding box of recent strokes (up to last 20 — enough for a full equation)
-  const recentCount = Math.min(strokes.length, 20);
-  const recentStrokes = strokes.slice(strokes.length - recentCount);
+  // Collect strokes drawn in the last 30 seconds
+  const now = Date.now();
+  const cutoff = now - 30000;
+  const recentStrokes = [];
+  for (let i = strokes.length - 1; i >= 0; i--) {
+    const s = strokes[i];
+    if (s._time && s._time < cutoff) break;
+    recentStrokes.unshift(s);
+  }
+  // Fallback: if no timestamps, use last 30 strokes
+  const toCapture = recentStrokes.length > 0 ? recentStrokes : strokes.slice(-30);
+
+  // Find bounding box
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const s of recentStrokes) {
+  for (const s of toCapture) {
+    if (s.text) { // text stroke — expand bbox for the text
+      const pt = s.points[0];
+      minX = Math.min(minX, pt.x);
+      minY = Math.min(minY, pt.y - s.size);
+      maxX = Math.max(maxX, pt.x + s.size * String(s.text).length * 0.6);
+      maxY = Math.max(maxY, pt.y + s.size);
+      continue;
+    }
     for (const p of (s.points || [])) {
       if (p.x < minX) minX = p.x;
       if (p.y < minY) minY = p.y;
@@ -1291,31 +1270,41 @@ function attemptCalculation() {
     }
   }
 
-  // Add padding
-  const pad = 50;
+  // Add 60px padding
+  const pad = 60;
   minX = Math.max(0, minX - pad);
   minY = Math.max(0, minY - pad);
   maxX = maxX + pad;
   maxY = maxY + pad;
-  const regionW = maxX - minX;
-  const regionH = maxY - minY;
 
-  if (regionW < 20 || regionH < 10) {
-    hideCalcIndicator();
-    return;
-  }
+  // Enforce minimum capture size of 300×150
+  let regionW = maxX - minX;
+  let regionH = maxY - minY;
+  if (regionW < 300) { const d = (300 - regionW) / 2; minX -= d; maxX += d; regionW = 300; }
+  if (regionH < 150) { const d = (150 - regionH) / 2; minY -= d; maxY += d; regionH = 150; }
 
-  // Render the region to an offscreen canvas
+  // Render at 2x resolution for retina clarity
+  const scale = 2;
   const offscreen = document.createElement('canvas');
-  offscreen.width = regionW * 2;
-  offscreen.height = regionH * 2;
+  offscreen.width = regionW * scale;
+  offscreen.height = regionH * scale;
   const offCtx = offscreen.getContext('2d');
   offCtx.fillStyle = '#ffffff';
   offCtx.fillRect(0, 0, offscreen.width, offscreen.height);
-  offCtx.scale(2, 2);
+  offCtx.scale(scale, scale);
   offCtx.translate(-minX, -minY);
 
-  for (const s of recentStrokes) {
+  for (const s of toCapture) {
+    if (s.text) {
+      const pt = s.points[0];
+      offCtx.save();
+      offCtx.font = `bold ${s.size}px -apple-system, BlinkMacSystemFont, sans-serif`;
+      offCtx.fillStyle = s.color || '#000';
+      offCtx.textBaseline = 'middle';
+      offCtx.fillText(s.text, pt.x, pt.y);
+      offCtx.restore();
+      continue;
+    }
     const pts = s.points || [];
     if (pts.length < 2) continue;
     offCtx.beginPath();
@@ -1328,15 +1317,13 @@ function attemptCalculation() {
     offCtx.stroke();
   }
 
-  // Get base64 (strip the data:image/png;base64, prefix)
+  // Export as PNG at full 2x resolution
   const dataUrl = offscreen.toDataURL('image/png');
   const base64 = dataUrl.split(',')[1];
 
-  // Position to place the answer: just right of the equals sign
-  const lastStroke = strokes[strokes.length - 1];
-  const lastPts = lastStroke.points || [];
-  const answerX = Math.max(...lastPts.map(p => p.x)) + 15;
-  const answerY = (Math.min(...lastPts.map(p => p.y)) + Math.max(...lastPts.map(p => p.y))) / 2;
+  // Position the answer to the right of the rightmost stroke
+  const answerX = maxX - pad + 15;
+  const answerY = (minY + pad + maxY - pad) / 2;
 
   if (ws.readyState === 1) {
     ws.send(JSON.stringify({
@@ -1347,6 +1334,12 @@ function attemptCalculation() {
     }));
   }
 }
+
+// Calc button handler
+calcBtn.addEventListener('click', () => {
+  if (calcWaiting) return;
+  attemptCalculation();
+});
 
 // Draw the answer text on the canvas as a stroke-based text
 function drawAnswerOnCanvas(answer, x, y) {
