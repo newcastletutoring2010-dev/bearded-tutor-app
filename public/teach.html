@@ -126,6 +126,23 @@
   }
   .color-btn.active { border-color: #2196F3; box-shadow: 0 0 0 2px #2196F3; }
 
+  .eraser-btn {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    border: 2px solid transparent;
+    background: #f0f0f0;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: #666;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .eraser-btn.active { border-color: #e74c3c; background: #fde8e8; color: #e74c3c; }
+
   /* --- PDF controls --- */
   #pdfControls {
     position: fixed;
@@ -305,6 +322,7 @@
 <div id="brushControls">
   <div class="brush-row" id="sizeRow"></div>
   <div class="brush-row" id="colorRow"></div>
+  <div class="brush-row"><button class="eraser-btn" id="eraserBtn" title="Eraser">ERS</button></div>
 </div>
 
 <div id="pdfControls">
@@ -359,6 +377,8 @@ let currentStroke = [];
 let drawing = false;
 let paused = false;
 let holdTimer = null;
+let eraserMode = false;
+let erasedAny = false;
 
 // --- Zoom / pan state ---
 let zoom = 1;
@@ -495,6 +515,46 @@ function redraw() {
   for (const s of strokes) drawStroke(s);
 }
 
+// --- Eraser helpers ---
+
+function updateEraserCursor() {
+  const r = Math.max(10, currentSize * 2);
+  const s = r * 2 + 2;
+  const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='${s}' height='${s}'><circle cx='${r+1}' cy='${r+1}' r='${r}' fill='none' stroke='%23999' stroke-width='1.5'/></svg>`;
+  canvas.style.cursor = `url("data:image/svg+xml,${svg}") ${r+1} ${r+1}, crosshair`;
+}
+
+// Check if a point (px, py) with radius hits any segment of a stroke
+function strokeIntersectsPoint(stroke, px, py, radius) {
+  if (stroke.text) {
+    const tp = stroke.points[0];
+    const textW = stroke.size * String(stroke.text).length * 0.6;
+    return px > tp.x - radius && px < tp.x + textW + radius && Math.abs(py - tp.y) < stroke.size / 2 + radius;
+  }
+  const pts = stroke.points || [];
+  const halfW = (stroke.size || 2.5) / 2;
+  for (let i = 0; i < pts.length - 1; i++) {
+    if (distToSegment({ x: px, y: py }, pts[i], pts[i + 1]) < radius + halfW) return true;
+  }
+  if (pts.length === 1 && Math.hypot(pts[0].x - px, pts[0].y - py) < radius + halfW) return true;
+  return false;
+}
+
+function checkEraserAt(pt) {
+  const eraserR = Math.max(10, currentSize * 2);
+  let removed = false;
+  for (let i = strokes.length - 1; i >= 0; i--) {
+    if (strokeIntersectsPoint(strokes[i], pt.x, pt.y, eraserR)) {
+      strokes.splice(i, 1);
+      removed = true;
+    }
+  }
+  if (removed) {
+    erasedAny = true;
+    redraw();
+  }
+}
+
 // --- Pointer events ---
 canvas.addEventListener('pointerdown', (e) => {
   if (e.pointerType === 'touch') return;
@@ -505,13 +565,25 @@ canvas.addEventListener('pointerdown', (e) => {
     holdTimer = null;
   }
   drawing = true;
-  currentStroke = [toCanvas(e.clientX, e.clientY)];
   canvas.setPointerCapture(e.pointerId);
+
+  if (eraserMode) {
+    erasedAny = false;
+    checkEraserAt(toCanvas(e.clientX, e.clientY));
+  } else {
+    currentStroke = [toCanvas(e.clientX, e.clientY)];
+  }
 });
 
 canvas.addEventListener('pointermove', (e) => {
   if (!drawing) return;
   e.preventDefault();
+
+  if (eraserMode) {
+    checkEraserAt(toCanvas(e.clientX, e.clientY));
+    return;
+  }
+
   const pt = toCanvas(e.clientX, e.clientY);
   currentStroke.push(pt);
   if (currentStroke.length >= 2) {
@@ -531,6 +603,15 @@ canvas.addEventListener('pointerup', (e) => {
   if (!drawing) return;
   e.preventDefault();
   drawing = false;
+
+  if (eraserMode) {
+    if (erasedAny && ws.readyState === 1) {
+      ws.send(JSON.stringify({ type: 'erase', strokes: strokes.map(normaliseStroke) }));
+      saveAnnotations();
+    }
+    return;
+  }
+
   if (currentStroke.length > 1) {
     const stroke = { points: currentStroke, color: currentColor, size: currentSize, _time: Date.now() };
     strokes.push(stroke);
@@ -689,8 +770,24 @@ COLORS.forEach((c) => {
     currentColor = c.value;
     colorRow.querySelectorAll('.color-btn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
+    // Exit eraser mode when a colour is selected
+    eraserMode = false;
+    document.getElementById('eraserBtn').classList.remove('active');
+    canvas.style.cursor = 'crosshair';
   });
   colorRow.appendChild(btn);
+});
+
+// --- Eraser button ---
+document.getElementById('eraserBtn').addEventListener('click', () => {
+  eraserMode = !eraserMode;
+  const btn = document.getElementById('eraserBtn');
+  btn.classList.toggle('active', eraserMode);
+  if (eraserMode) {
+    updateEraserCursor();
+  } else {
+    canvas.style.cursor = 'crosshair';
+  }
 });
 
 // =====================================================

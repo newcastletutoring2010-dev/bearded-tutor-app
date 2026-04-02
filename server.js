@@ -217,6 +217,13 @@ wss.on('connection', (ws) => {
         }
         break;
 
+      case 'erase':
+        strokes = msg.strokes || [];
+        if (!paused) {
+          broadcast({ type: 'full-redraw', strokes }, 'teacher');
+        }
+        break;
+
       case 'pause':
         paused = true;
         if (msg.snapshot) {
