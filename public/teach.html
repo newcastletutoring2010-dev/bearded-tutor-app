@@ -1431,9 +1431,19 @@ calcBtn.addEventListener('click', () => {
 
 // Draw the answer text on the canvas as a stroke-based text
 function drawAnswerOnCanvas(answer, x, y) {
-  // Use canvas fillText to render, then capture as a visual element
-  // We'll render the text and also send it as a stroke to students
-  const fontSize = Math.max(20, currentSize * 5);
+  // Estimate handwriting height from recent strokes (skip last 2 = equals sign)
+  const contentStrokes = strokes.filter(s => !s.text).slice(-10, -2);
+  let fontSize = 30; // fallback
+  if (contentStrokes.length > 0) {
+    let minY = Infinity, maxY = -Infinity;
+    for (const s of contentStrokes) {
+      for (const p of (s.points || [])) {
+        if (p.y < minY) minY = p.y;
+        if (p.y > maxY) maxY = p.y;
+      }
+    }
+    fontSize = Math.max(24, Math.min(120, (maxY - minY) * 0.9));
+  }
 
   ctx.save();
   ctx.font = `bold ${fontSize}px -apple-system, BlinkMacSystemFont, sans-serif`;
