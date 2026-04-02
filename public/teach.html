@@ -519,11 +519,15 @@ canvas.addEventListener('pointerup', (e) => {
     strokes.push(stroke);
     sendStroke(stroke);
     saveAnnotations();
-    // Start 1-second hold timer for shape recognition only.
-    // Calculator is now triggered by the dedicated Calc button.
+    // Start 1-second hold timer: check for equals sign first,
+    // then fall back to shape recognition.
     holdTimer = setTimeout(() => {
       holdTimer = null;
-      attemptShapeRecognition();
+      if (detectEqualsSign()) {
+        attemptCalculation();
+      } else {
+        attemptShapeRecognition();
+      }
     }, 1000);
   }
   currentStroke = [];
@@ -1349,6 +1353,67 @@ function attemptCalculation() {
       y: answerY,
     }));
   }
+}
+
+// --- Equals-sign detection ---
+// Two roughly horizontal strokes of similar length, close together vertically.
+function detectEqualsSign() {
+  if (strokes.length < 2) {
+    console.log('[calc] Stroke check: fewer than 2 strokes');
+    return false;
+  }
+  const cur = strokes[strokes.length - 1];
+  const prev = strokes[strokes.length - 2];
+  // Skip text strokes
+  if (cur.text || prev.text) { console.log('[calc] Stroke check: text stroke — skip'); return false; }
+  const curPts = cur.points || [], prevPts = prev.points || [];
+  if (curPts.length < 3 || prevPts.length < 3) { console.log('[calc] Stroke check: too few points'); return false; }
+
+  // Measure each stroke's bounding box
+  const cXs = curPts.map(p => p.x), cYs = curPts.map(p => p.y);
+  const cW = Math.max(...cXs) - Math.min(...cXs);
+  const cH = Math.max(...cYs) - Math.min(...cYs);
+
+  const pXs = prevPts.map(p => p.x), pYs = prevPts.map(p => p.y);
+  const pW = Math.max(...pXs) - Math.min(...pXs);
+  const pH = Math.max(...pYs) - Math.min(...pYs);
+
+  // Both must be roughly horizontal: y-range < 60% of x-range, and x-range > 10px
+  const curHoriz = cW > 10 && cH < cW * 0.6;
+  const prevHoriz = pW > 10 && pH < pW * 0.6;
+  if (!curHoriz || !prevHoriz) {
+    console.log(`[calc] Stroke check: not horizontal — cur(w=${cW.toFixed(0)} h=${cH.toFixed(0)} horiz=${curHoriz}) prev(w=${pW.toFixed(0)} h=${pH.toFixed(0)} horiz=${prevHoriz})`);
+    return false;
+  }
+
+  // Similar length: neither is more than 3× the other
+  const lenRatio = Math.max(cW, pW) / Math.min(cW, pW);
+  if (lenRatio > 3) {
+    console.log(`[calc] Stroke check: length ratio too different — ${lenRatio.toFixed(1)}`);
+    return false;
+  }
+
+  // Vertically close: midpoints within 1.5× average width
+  const curMidY = (Math.min(...cYs) + Math.max(...cYs)) / 2;
+  const prevMidY = (Math.min(...pYs) + Math.max(...pYs)) / 2;
+  const vGap = Math.abs(curMidY - prevMidY);
+  const avgW = (cW + pW) / 2;
+  if (vGap < 2 || vGap > avgW * 1.5) {
+    console.log(`[calc] Stroke check: vertical gap wrong — gap=${vGap.toFixed(0)} avgW=${avgW.toFixed(0)}`);
+    return false;
+  }
+
+  // Horizontally overlapping: midpoints within average width
+  const curMidX = (Math.min(...cXs) + Math.max(...cXs)) / 2;
+  const prevMidX = (Math.min(...pXs) + Math.max(...pXs)) / 2;
+  const hDist = Math.abs(curMidX - prevMidX);
+  if (hDist > avgW * 0.8) {
+    console.log(`[calc] Stroke check: not aligned horizontally — hDist=${hDist.toFixed(0)} avgW=${avgW.toFixed(0)}`);
+    return false;
+  }
+
+  console.log(`[calc] Equals sign detected! cur(w=${cW.toFixed(0)} h=${cH.toFixed(0)}) prev(w=${pW.toFixed(0)} h=${pH.toFixed(0)}) vGap=${vGap.toFixed(0)} hDist=${hDist.toFixed(0)}`);
+  return true;
 }
 
 // Calc button handler
