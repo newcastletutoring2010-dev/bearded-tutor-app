@@ -518,10 +518,13 @@ canvas.addEventListener('pointerup', (e) => {
     strokes.push(stroke);
     sendStroke(stroke);
     saveAnnotations();
-    // Start 1-second hold timer for shape recognition OR calculator
+    // Start 1-second hold timer for shape recognition OR calculator.
+    // detectEqualsSign checks the last TWO strokes, so if it matches,
+    // we skip shape recognition entirely to prevent the equals-sign
+    // strokes from being snapped to lines or circles.
     holdTimer = setTimeout(() => {
       holdTimer = null;
-      if (detectEqualsSign(stroke)) {
+      if (strokes.length >= 2 && detectEqualsSign(strokes[strokes.length - 1])) {
         attemptCalculation();
       } else {
         attemptShapeRecognition();
@@ -1024,6 +1027,14 @@ function detectLine(pts) {
 // After the fit, the same stdR / meanR < 0.25 variance check is applied.
 function detectCircle(pts) {
   if (pts.length < 20) return null;
+
+  // --- Geometric gating: reject handwriting-sized / wrong-aspect strokes ---
+  const gateXs = pts.map(p => p.x), gateYs = pts.map(p => p.y);
+  const bboxW = Math.max(...gateXs) - Math.min(...gateXs);
+  const bboxH = Math.max(...gateYs) - Math.min(...gateYs);
+  if (bboxW < 20 || bboxH < 20) return null; // too small — likely a character
+  const aspect = bboxW / bboxH;
+  if (aspect < 0.5 || aspect > 2.0) return null; // too narrow/wide — not circular
 
   const n = pts.length;
 
