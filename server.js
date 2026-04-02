@@ -296,22 +296,46 @@ wss.on('connection', (ws) => {
                   data: msg.image,
                 },
               },
-              'This is a photograph of a handwritten mathematical equation on a whiteboard or paper. The handwriting may not be perfect. Please read the equation carefully and calculate the result. Common symbols used: x or × means multiply, ÷ or / means divide, + means add, - means subtract, ^ means power. Respond ONLY with a JSON object like this: {"equation": "4 x 4", "answer": "16"}\nDo not include any explanation, markdown, or other text.',
+              'You must respond with ONLY a raw JSON object, no markdown, no code blocks, no explanation. Example response: {"equation":"4x4","answer":"16"}\nNow read this handwritten equation and respond:',
             ]);
 
-            const text = result.response.text().trim();
-            console.log(`[calc] Raw Gemini response: ${text}`);
-            // Robust extraction: find the first { and last } to isolate JSON
+            const rawText = result.response.text();
+            console.log(`[calc] Raw Gemini response: "${rawText}"`);
+
+            // --- Robust JSON extraction ---
+            // 1. Strip markdown code fences if present
+            let text = rawText.trim()
+              .replace(/^```(?:json)?\s*/i, '')
+              .replace(/\s*```\s*$/i, '')
+              .trim();
+
+            // 2. Extract first { ... last }
             const firstBrace = text.indexOf('{');
             const lastBrace = text.lastIndexOf('}');
-            if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) {
-              throw new Error('Could not parse math');
+            let parsed = null;
+
+            if (firstBrace !== -1 && lastBrace > firstBrace) {
+              const jsonStr = text.slice(firstBrace, lastBrace + 1);
+              try {
+                parsed = JSON.parse(jsonStr);
+              } catch (parseErr) {
+                console.error(`[calc] JSON.parse failed on: "${jsonStr}"`, parseErr.message);
+              }
             }
-            const jsonStr = text.slice(firstBrace, lastBrace + 1);
-            let parsed;
-            try {
-              parsed = JSON.parse(jsonStr);
-            } catch {
+
+            // 3. Regex fallback: try to extract equation and answer from free text
+            if (!parsed) {
+              console.log('[calc] Attempting regex fallback extraction...');
+              const eqMatch = text.match(/equation["\s:]+([^"}\n]+)/i);
+              const ansMatch = text.match(/answer["\s:]+([^"}\n]+)/i);
+              if (eqMatch && ansMatch) {
+                parsed = { equation: eqMatch[1].trim().replace(/[",]/g, ''), answer: ansMatch[1].trim().replace(/[",]/g, '') };
+                console.log(`[calc] Regex fallback extracted: ${JSON.stringify(parsed)}`);
+              }
+            }
+
+            if (!parsed || !parsed.answer) {
+              console.error(`[calc] Could not parse math from response: "${text}"`);
               throw new Error('Could not parse math');
             }
 

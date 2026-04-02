@@ -552,11 +552,15 @@ ws.addEventListener('message', async (e) => {
   }
 
   if (msg.type === 'calculate_result') {
+    clearTimeout(calcTimeoutId);
     hideCalcIndicator();
     drawAnswerOnCanvas(msg.answer, msg.x, msg.y);
   }
 
   if (msg.type === 'calculate_error') {
+    clearTimeout(calcTimeoutId);
+    calcWaiting = false;
+    calcBtn.textContent = 'Calc';
     showCalcIndicator('Could not calculate', 'error');
     setTimeout(hideCalcIndicator, 2000);
   }
@@ -1218,6 +1222,7 @@ function attemptShapeRecognition() {
 const calcIndicatorEl = document.getElementById('calcIndicator');
 const calcBtn = document.getElementById('calcBtn');
 let calcWaiting = false;
+let calcTimeoutId = null;
 
 function showCalcIndicator(text, cls) {
   calcIndicatorEl.textContent = text;
@@ -1238,6 +1243,17 @@ function attemptCalculation() {
   calcWaiting = true;
   calcBtn.textContent = '...';
   showCalcIndicator('Calculating...', 'loading');
+
+  // Auto-reset after 15 seconds if no response arrives
+  clearTimeout(calcTimeoutId);
+  calcTimeoutId = setTimeout(() => {
+    if (calcWaiting) {
+      calcWaiting = false;
+      calcBtn.textContent = 'Calc';
+      showCalcIndicator('Timed out', 'error');
+      setTimeout(hideCalcIndicator, 2000);
+    }
+  }, 15000);
 
   // Collect strokes drawn in the last 30 seconds
   const now = Date.now();
