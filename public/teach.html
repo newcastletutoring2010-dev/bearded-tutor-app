@@ -348,6 +348,7 @@
   <button id="pauseBtn">Pause</button>
   <button id="revealBtn">Reveal</button>
   <button id="undoBtn">Undo</button>
+  <button id="redoBtn">Redo</button>
   <button id="clearBtn">Clear</button>
   <button id="calcBtn">Calc</button>
 </div>
@@ -379,6 +380,80 @@ let paused = false;
 let holdTimer = null;
 let eraserMode = false;
 let erasedAny = false;
+
+// --- Undo / Redo history ---
+// Per-page history: Map of pageKey → { states: [strokes[]], index: number }
+const historyMap = new Map();
+
+function getPageKey() {
+  if (pdfDoc && pdfStudent && pdfFilename) return `${pdfStudent}/${pdfFilename}/${pdfPageNum}`;
+  return '_wb_';
+}
+
+function getHistory() {
+  const key = getPageKey();
+  if (!historyMap.has(key)) historyMap.set(key, { states: [], index: -1 });
+  return historyMap.get(key);
+}
+
+function deepCopyStrokes(arr) {
+  return arr.map(s => {
+    const c = { points: s.points.map(p => ({ ...p })), color: s.color, size: s.size };
+    if (s.text) c.text = s.text;
+    if (s._time) c._time = s._time;
+    return c;
+  });
+}
+
+function pushHistory() {
+  const h = getHistory();
+  h.states.splice(h.index + 1); // truncate redo states
+  h.states.push(deepCopyStrokes(strokes));
+  h.index = h.states.length - 1;
+  updateUndoRedoButtons();
+}
+
+function resetHistory() {
+  const key = getPageKey();
+  historyMap.set(key, { states: [deepCopyStrokes(strokes)], index: 0 });
+  updateUndoRedoButtons();
+}
+
+function syncToServer() {
+  if (ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: 'history-sync', strokes: strokes.map(normaliseStroke) }));
+  }
+}
+
+function performUndo() {
+  const h = getHistory();
+  if (h.index <= 0) return;
+  h.index--;
+  strokes = deepCopyStrokes(h.states[h.index]);
+  redraw();
+  syncToServer();
+  saveAnnotations();
+  updateUndoRedoButtons();
+}
+
+function performRedo() {
+  const h = getHistory();
+  if (h.index >= h.states.length - 1) return;
+  h.index++;
+  strokes = deepCopyStrokes(h.states[h.index]);
+  redraw();
+  syncToServer();
+  saveAnnotations();
+  updateUndoRedoButtons();
+}
+
+function updateUndoRedoButtons() {
+  const h = getHistory();
+  const undoEl = document.getElementById('undoBtn');
+  const redoEl = document.getElementById('redoBtn');
+  if (undoEl) undoEl.style.opacity = h.index <= 0 ? '0.4' : '1';
+  if (redoEl) redoEl.style.opacity = h.index >= h.states.length - 1 ? '0.4' : '1';
+}
 
 // --- Zoom / pan state ---
 let zoom = 1;
@@ -605,8 +680,9 @@ canvas.addEventListener('pointerup', (e) => {
   drawing = false;
 
   if (eraserMode) {
-    if (erasedAny && ws.readyState === 1) {
-      ws.send(JSON.stringify({ type: 'erase', strokes: strokes.map(normaliseStroke) }));
+    if (erasedAny) {
+      pushHistory();
+      syncToServer();
       saveAnnotations();
     }
     return;
@@ -616,6 +692,7 @@ canvas.addEventListener('pointerup', (e) => {
     const stroke = { points: currentStroke, color: currentColor, size: currentSize, _time: Date.now() };
     strokes.push(stroke);
     sendStroke(stroke);
+    pushHistory();
     saveAnnotations();
     // Start 1-second hold timer: check for equals sign first,
     // then fall back to shape recognition.
@@ -671,6 +748,7 @@ ws.addEventListener('message', async (e) => {
     // Restore strokes from server state (e.g. after a page refresh)
     strokes = (msg.strokes || []).map(denormaliseStroke);
     redraw();
+    resetHistory();
 
     // Restore paused state
     if (msg.paused) {
@@ -706,6 +784,7 @@ function getSnapshot() {
 const pauseBtn = document.getElementById('pauseBtn');
 const revealBtn = document.getElementById('revealBtn');
 const undoBtn = document.getElementById('undoBtn');
+const redoBtn = document.getElementById('redoBtn');
 const clearBtn = document.getElementById('clearBtn');
 
 pauseBtn.addEventListener('click', () => {
@@ -724,19 +803,24 @@ revealBtn.addEventListener('click', () => {
   ws.send(JSON.stringify({ type: 'reveal', snapshot: getSnapshot() }));
 });
 
-undoBtn.addEventListener('click', () => {
-  if (strokes.length === 0) return;
-  strokes.pop();
-  redraw();
-  ws.send(JSON.stringify({ type: 'undo' }));
-  saveAnnotations();
-});
+undoBtn.addEventListener('click', () => performUndo());
+redoBtn.addEventListener('click', () => performRedo());
 
 clearBtn.addEventListener('click', () => {
   strokes = [];
+  pushHistory();
   redraw();
-  ws.send(JSON.stringify({ type: 'clear' }));
+  syncToServer();
   saveAnnotations();
+});
+
+// Keyboard shortcuts: Cmd/Ctrl+Z = undo, Cmd/Ctrl+Shift+Z = redo
+document.addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
+    e.preventDefault();
+    if (e.shiftKey) performRedo();
+    else performUndo();
+  }
 });
 
 // --- Build brush controls ---
@@ -1026,6 +1110,7 @@ async function loadAnnotations() {
     const data = await res.json();
     strokes = (data.strokes || []).map(denormaliseStroke);
     redraw();
+    resetHistory();
     // Send to students too (normalised for the wire)
     if (strokes.length > 0) {
       ws.send(JSON.stringify({ type: 'reveal', snapshot: null, strokes: strokes.map(normaliseStroke) }));
@@ -1325,13 +1410,8 @@ function attemptShapeRecognition() {
   strokes[strokes.length - 1] = snapped;
   redraw();
   flashSnap(snapped);
-
-  if (ws.readyState === 1) {
-    ws.send(JSON.stringify({ type: 'undo' }));
-    const n = normaliseStroke(snapped);
-    ws.send(JSON.stringify({ type: 'stroke', points: n.points, color: n.color, size: n.size }));
-  }
-
+  pushHistory();
+  syncToServer();
   saveAnnotations();
 }
 
@@ -1582,6 +1662,7 @@ function drawAnswerOnCanvas(answer, x, y) {
     ws.send(JSON.stringify({ type: 'stroke', points: n.points, color: n.color, size: n.size, text: n.text }));
   }
 
+  pushHistory();
   saveAnnotations();
 }
 
