@@ -143,6 +143,42 @@
   }
   .eraser-btn.active { border-color: #e74c3c; background: #fde8e8; color: #e74c3c; }
 
+  .tool-btn {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    border: 2px solid transparent;
+    background: #f0f0f0;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1rem;
+    font-weight: 700;
+    color: #666;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .tool-btn.active { border-color: #2196F3; background: #e3f2fd; color: #2196F3; }
+
+  #textInput {
+    display: none;
+    position: absolute;
+    z-index: 5;
+    min-width: 60px;
+    max-width: 80vw;
+    padding: 4px 6px;
+    border: 2px solid #2196F3;
+    border-radius: 6px;
+    background: rgba(255,255,255,0.95);
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-weight: bold;
+    outline: none;
+    resize: none;
+    overflow: hidden;
+    line-height: 1.2;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+  }
+
   /* --- PDF controls --- */
   #pdfControls {
     position: fixed;
@@ -322,8 +358,12 @@
 <div id="brushControls">
   <div class="brush-row" id="sizeRow"></div>
   <div class="brush-row" id="colorRow"></div>
-  <div class="brush-row"><button class="eraser-btn" id="eraserBtn" title="Eraser">ERS</button></div>
+  <div class="brush-row">
+    <button class="eraser-btn" id="eraserBtn" title="Eraser">ERS</button>
+    <button class="tool-btn" id="textToolBtn" title="Text">T</button>
+  </div>
 </div>
+<textarea id="textInput" rows="1"></textarea>
 
 <div id="pdfControls">
   <div class="pdf-ctrl-row">
@@ -380,6 +420,8 @@ let paused = false;
 let holdTimer = null;
 let eraserMode = false;
 let erasedAny = false;
+let textMode = false;
+let textInputActive = false;
 
 // --- Undo / Redo history ---
 // Per-page history: Map of pageKey → { states: [strokes[]], index: number }
@@ -639,6 +681,12 @@ canvas.addEventListener('pointerdown', (e) => {
     clearTimeout(holdTimer);
     holdTimer = null;
   }
+
+  if (textMode) {
+    if (!textInputActive) openTextInput(e.clientX, e.clientY);
+    return;
+  }
+
   drawing = true;
   canvas.setPointerCapture(e.pointerId);
 
@@ -854,9 +902,12 @@ COLORS.forEach((c) => {
     currentColor = c.value;
     colorRow.querySelectorAll('.color-btn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
-    // Exit eraser mode when a colour is selected
+    // Exit eraser/text mode when a colour is selected
     eraserMode = false;
+    textMode = false;
     document.getElementById('eraserBtn').classList.remove('active');
+    document.getElementById('textToolBtn').classList.remove('active');
+    cancelTextInput();
     canvas.style.cursor = 'crosshair';
   });
   colorRow.appendChild(btn);
@@ -865,6 +916,9 @@ COLORS.forEach((c) => {
 // --- Eraser button ---
 document.getElementById('eraserBtn').addEventListener('click', () => {
   eraserMode = !eraserMode;
+  textMode = false;
+  document.getElementById('textToolBtn').classList.remove('active');
+  cancelTextInput();
   const btn = document.getElementById('eraserBtn');
   btn.classList.toggle('active', eraserMode);
   if (eraserMode) {
@@ -873,6 +927,95 @@ document.getElementById('eraserBtn').addEventListener('click', () => {
     canvas.style.cursor = 'crosshair';
   }
 });
+
+// --- Text tool ---
+const textInput = document.getElementById('textInput');
+const textToolBtn = document.getElementById('textToolBtn');
+let textPlaceX = 0, textPlaceY = 0; // canvas-space coords where text will be placed
+
+function exitAllModes() {
+  eraserMode = false;
+  textMode = false;
+  textInputActive = false;
+  document.getElementById('eraserBtn').classList.remove('active');
+  textToolBtn.classList.remove('active');
+  canvas.style.cursor = 'crosshair';
+  textInput.style.display = 'none';
+}
+
+textToolBtn.addEventListener('click', () => {
+  textMode = !textMode;
+  eraserMode = false;
+  document.getElementById('eraserBtn').classList.remove('active');
+  textToolBtn.classList.toggle('active', textMode);
+  canvas.style.cursor = textMode ? 'text' : 'crosshair';
+  if (!textMode) cancelTextInput();
+});
+
+function getTextFontSize() {
+  // Scale font with brush size: S=14, M=22, L=36, XL=56
+  return Math.max(14, Math.round(currentSize * 3.2));
+}
+
+function openTextInput(clientX, clientY) {
+  const pt = toCanvas(clientX, clientY);
+  textPlaceX = pt.x;
+  textPlaceY = pt.y;
+  const fs = getTextFontSize();
+  textInput.value = '';
+  textInput.style.display = 'block';
+  textInput.style.left = clientX + 'px';
+  textInput.style.top = clientY + 'px';
+  textInput.style.fontSize = (fs * zoom) + 'px';
+  textInput.style.color = currentColor;
+  textInput.rows = 1;
+  textInputActive = true;
+  setTimeout(() => textInput.focus(), 0);
+}
+
+function confirmTextInput() {
+  const val = textInput.value.trim();
+  textInput.style.display = 'none';
+  textInputActive = false;
+  if (!val) return;
+
+  const fs = getTextFontSize();
+  const textStroke = {
+    points: [{ x: textPlaceX, y: textPlaceY }],
+    color: currentColor,
+    size: fs,
+    text: val,
+    _time: Date.now(),
+  };
+  strokes.push(textStroke);
+  redraw();
+  sendStroke(textStroke);
+  pushHistory();
+  saveAnnotations();
+}
+
+function cancelTextInput() {
+  textInput.style.display = 'none';
+  textInputActive = false;
+}
+
+textInput.addEventListener('keydown', (e) => {
+  e.stopPropagation(); // prevent Cmd+Z from triggering undo while typing
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    confirmTextInput();
+  }
+  if (e.key === 'Escape') {
+    cancelTextInput();
+  }
+});
+
+// Click outside the text input → confirm
+document.addEventListener('pointerdown', (e) => {
+  if (textInputActive && e.target !== textInput) {
+    confirmTextInput();
+  }
+}, true);
 
 // =====================================================
 // PDF LOADING & RENDERING
