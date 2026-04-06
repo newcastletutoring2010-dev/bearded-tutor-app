@@ -52,6 +52,209 @@ app.get('/library', (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'library.html'));
 });
 
+app.get('/resources', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'resources.html'));
+});
+
+// --- Resources API ---
+const RESOURCES_DIR = process.env.RAILWAY_ENVIRONMENT
+  ? '/app/uploads/resources'
+  : path.join(__dirname, 'uploads', 'resources');
+const RESOURCES_META = path.join(RESOURCES_DIR, '_meta.json');
+
+const DEFAULT_SUBJECTS = [
+  { name: 'Biology', color: '#2D7D46' },
+  { name: 'Chemistry', color: '#7B2D8B' },
+  { name: 'Physics', color: '#C0392B' },
+  { name: 'Maths', color: '#2C3E8B' },
+  { name: 'English', color: '#B8860B' },
+];
+const EXAM_BOARDS = ['AQA', 'Edexcel', 'OCR', 'WJEC'];
+const YEAR_GROUPS = ['KS2', 'KS3', 'GCSE Foundation', 'GCSE Higher', 'AS Level', 'A Level'];
+
+function ensureResourcesStructure() {
+  if (!fs.existsSync(RESOURCES_DIR)) fs.mkdirSync(RESOURCES_DIR, { recursive: true });
+  if (!fs.existsSync(RESOURCES_META)) {
+    // Build the default folder tree
+    const tree = { id: 'root', name: 'Resources', children: [], files: [] };
+    for (const subj of DEFAULT_SUBJECTS) {
+      const subjNode = { id: subj.name.toLowerCase(), name: subj.name, color: subj.color, children: [], files: [] };
+      for (const board of EXAM_BOARDS) {
+        const boardNode = { id: `${subjNode.id}_${board.toLowerCase()}`, name: board, children: [], files: [] };
+        for (const yg of YEAR_GROUPS) {
+          boardNode.children.push({ id: `${boardNode.id}_${yg.toLowerCase().replace(/\s+/g, '-')}`, name: yg, children: [], files: [] });
+        }
+        subjNode.children.push(boardNode);
+      }
+      tree.children.push(subjNode);
+    }
+    fs.writeFileSync(RESOURCES_META, JSON.stringify(tree, null, 2));
+  }
+  return JSON.parse(fs.readFileSync(RESOURCES_META, 'utf-8'));
+}
+
+function saveResourcesMeta(tree) {
+  fs.writeFileSync(RESOURCES_META, JSON.stringify(tree, null, 2));
+}
+
+function findNode(node, id) {
+  if (node.id === id) return node;
+  for (const child of (node.children || [])) {
+    const found = findNode(child, id);
+    if (found) return found;
+  }
+  return null;
+}
+
+function findParent(node, id) {
+  for (const child of (node.children || [])) {
+    if (child.id === id) return node;
+    const found = findParent(child, id);
+    if (found) return found;
+  }
+  return null;
+}
+
+function getNodePath(node, id, trail = []) {
+  if (node.id === id) return [...trail, { id: node.id, name: node.name }];
+  for (const child of (node.children || [])) {
+    const result = getNodePath(child, id, [...trail, { id: node.id, name: node.name }]);
+    if (result) return result;
+  }
+  return null;
+}
+
+function searchFiles(node, query, pathSoFar = '') {
+  const results = [];
+  const currentPath = pathSoFar ? `${pathSoFar} > ${node.name}` : node.name;
+  for (const f of (node.files || [])) {
+    if (f.name.toLowerCase().includes(query.toLowerCase())) {
+      results.push({ ...f, folderPath: currentPath, folderId: node.id });
+    }
+  }
+  for (const child of (node.children || [])) {
+    results.push(...searchFiles(child, query, currentPath));
+  }
+  return results;
+}
+
+// Get folder tree
+app.get('/api/resources/tree', (_req, res) => {
+  res.json(ensureResourcesStructure());
+});
+
+// Get folder contents
+app.get('/api/resources/folder/:id', (req, res) => {
+  const tree = ensureResourcesStructure();
+  const node = findNode(tree, req.params.id);
+  if (!node) return res.status(404).json({ error: 'Folder not found' });
+  const breadcrumb = getNodePath(tree, req.params.id) || [];
+  res.json({ ...node, breadcrumb });
+});
+
+// Create sub-folder
+app.post('/api/resources/folder/:parentId', (req, res) => {
+  const tree = ensureResourcesStructure();
+  const parent = findNode(tree, req.params.parentId);
+  if (!parent) return res.status(404).json({ error: 'Parent not found' });
+  const name = (req.body.name || '').trim();
+  if (!name) return res.status(400).json({ error: 'Name required' });
+  const id = `${parent.id}_${name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}_${Date.now()}`;
+  const newFolder = { id, name, children: [], files: [] };
+  parent.children.push(newFolder);
+  saveResourcesMeta(tree);
+  res.json(newFolder);
+});
+
+// Rename folder
+app.patch('/api/resources/folder/:id', (req, res) => {
+  const tree = ensureResourcesStructure();
+  const node = findNode(tree, req.params.id);
+  if (!node) return res.status(404).json({ error: 'Not found' });
+  node.name = (req.body.name || node.name).trim();
+  saveResourcesMeta(tree);
+  res.json({ ok: true });
+});
+
+// Delete folder
+app.delete('/api/resources/folder/:id', (req, res) => {
+  const tree = ensureResourcesStructure();
+  const parent = findParent(tree, req.params.id);
+  if (!parent) return res.status(404).json({ error: 'Not found' });
+  parent.children = parent.children.filter(c => c.id !== req.params.id);
+  saveResourcesMeta(tree);
+  // Also delete folder files from disk
+  const dirPath = path.join(RESOURCES_DIR, req.params.id);
+  if (fs.existsSync(dirPath)) fs.rmSync(dirPath, { recursive: true, force: true });
+  res.json({ ok: true });
+});
+
+// Upload resource file
+const resourceStorage = multer.diskStorage({
+  destination(req, _file, cb) {
+    const dir = path.join(RESOURCES_DIR, req.params.folderId);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    cb(null, dir);
+  },
+  filename(_req, file, cb) { cb(null, file.originalname); },
+});
+const resourceUpload = multer({
+  storage: resourceStorage,
+  fileFilter(_req, file, cb) {
+    const allowed = ['application/pdf', 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'image/png', 'image/jpeg'];
+    cb(null, allowed.includes(file.mimetype));
+  },
+});
+
+app.post('/api/resources/upload/:folderId', resourceUpload.single('file'), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file' });
+  const tree = ensureResourcesStructure();
+  const node = findNode(tree, req.params.folderId);
+  if (!node) return res.status(404).json({ error: 'Folder not found' });
+  const fileEntry = {
+    name: req.file.originalname,
+    size: req.file.size,
+    type: req.file.mimetype,
+    uploaded: new Date().toISOString(),
+    diskPath: `${req.params.folderId}/${req.file.originalname}`,
+  };
+  // Remove duplicate if re-uploading same name
+  node.files = (node.files || []).filter(f => f.name !== fileEntry.name);
+  node.files.push(fileEntry);
+  saveResourcesMeta(tree);
+  res.json(fileEntry);
+});
+
+// Download/serve resource file
+app.get('/api/resources/file/:folderId/:filename', (req, res) => {
+  const filePath = path.join(RESOURCES_DIR, req.params.folderId, req.params.filename);
+  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Not found' });
+  res.sendFile(filePath);
+});
+
+// Delete resource file
+app.delete('/api/resources/file/:folderId/:filename', (req, res) => {
+  const tree = ensureResourcesStructure();
+  const node = findNode(tree, req.params.folderId);
+  if (node) {
+    node.files = (node.files || []).filter(f => f.name !== req.params.filename);
+    saveResourcesMeta(tree);
+  }
+  const filePath = path.join(RESOURCES_DIR, req.params.folderId, req.params.filename);
+  if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+  res.json({ ok: true });
+});
+
+// Search
+app.get('/api/resources/search', (req, res) => {
+  const q = req.query.q || '';
+  if (q.length < 2) return res.json([]);
+  const tree = ensureResourcesStructure();
+  res.json(searchFiles(tree, q));
+});
+
 // --- Library API ---
 // List all students
 app.get('/api/students', (_req, res) => {

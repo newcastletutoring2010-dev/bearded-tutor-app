@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Resources — Bearded Tutor</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; color: #333; min-height: 100vh; }
+
+  header { background: #fff; border-bottom: 1px solid #e0e0e0; padding: 14px 24px; display: flex; align-items: center; justify-content: space-between; }
+  header h1 { font-size: 1.3rem; font-weight: 700; }
+  header a { color: #2196F3; text-decoration: none; font-weight: 600; font-size: 0.9rem; }
+
+  .search-bar { padding: 12px 24px; background: #fff; border-bottom: 1px solid #eee; }
+  .search-bar input { width: 100%; padding: 10px 14px; border: 2px solid #ddd; border-radius: 8px; font-size: 0.95rem; outline: none; }
+  .search-bar input:focus { border-color: #2196F3; }
+
+  .breadcrumb { padding: 10px 24px; font-size: 0.85rem; color: #888; display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+  .breadcrumb span { cursor: pointer; color: #2196F3; font-weight: 500; }
+  .breadcrumb span:last-child { color: #333; cursor: default; font-weight: 600; }
+  .breadcrumb .sep { color: #ccc; cursor: default; }
+
+  .container { max-width: 900px; margin: 0 auto; padding: 16px 24px; }
+
+  .toolbar { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+  .btn { padding: 8px 16px; border: none; border-radius: 8px; font-size: 0.85rem; font-weight: 600; cursor: pointer; }
+  .btn-primary { background: #2196F3; color: #fff; }
+  .btn-primary:hover { background: #1976D2; }
+  .btn-sm { padding: 5px 10px; font-size: 0.8rem; }
+  .btn-danger { background: #e74c3c; color: #fff; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+
+  .folder-card { background: #fff; border-radius: 12px; padding: 16px; cursor: pointer; border-left: 4px solid #ddd; box-shadow: 0 1px 4px rgba(0,0,0,0.06); transition: box-shadow 0.15s, transform 0.1s; }
+  .folder-card:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.12); transform: translateY(-1px); }
+  .folder-icon { font-size: 1.5rem; margin-bottom: 6px; }
+  .folder-name { font-weight: 600; font-size: 0.95rem; word-break: break-word; }
+  .folder-count { font-size: 0.75rem; color: #999; margin-top: 2px; }
+  .folder-actions { margin-top: 8px; display: flex; gap: 6px; }
+  .folder-actions button { font-size: 0.7rem; padding: 2px 8px; border: 1px solid #ddd; border-radius: 4px; background: #fff; cursor: pointer; color: #666; }
+  .folder-actions button:hover { background: #f0f0f0; }
+
+  .file-card { background: #fff; border-radius: 12px; padding: 14px; box-shadow: 0 1px 4px rgba(0,0,0,0.06); display: flex; flex-direction: column; gap: 6px; }
+  .file-icon { font-size: 1.8rem; }
+  .file-name { font-weight: 600; font-size: 0.85rem; word-break: break-word; }
+  .file-meta { font-size: 0.72rem; color: #999; }
+  .file-actions { display: flex; gap: 6px; margin-top: auto; }
+  .file-actions button { font-size: 0.72rem; padding: 3px 8px; border: 1px solid #ddd; border-radius: 4px; background: #fff; cursor: pointer; }
+  .file-actions button:hover { background: #f0f0f0; }
+  .file-actions .open-btn { background: #2196F3; color: #fff; border-color: #2196F3; }
+
+  .empty { text-align: center; color: #aaa; padding: 32px; grid-column: 1 / -1; }
+
+  .search-results { list-style: none; }
+  .search-result { padding: 10px 14px; background: #fff; border-radius: 8px; margin-bottom: 6px; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+  .search-result:hover { background: #e3f2fd; }
+  .search-path { font-size: 0.75rem; color: #888; }
+
+  /* Modal */
+  .modal-bg { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.4); z-index: 100; align-items: center; justify-content: center; }
+  .modal-bg.visible { display: flex; }
+  .modal-box { background: #fff; border-radius: 14px; padding: 20px; width: 90%; max-width: 360px; }
+  .modal-box h3 { margin-bottom: 12px; font-size: 1rem; }
+  .modal-box input { width: 100%; padding: 8px 12px; border: 2px solid #ddd; border-radius: 8px; font-size: 0.95rem; margin-bottom: 12px; outline: none; }
+  .modal-box input:focus { border-color: #2196F3; }
+  .modal-btns { display: flex; gap: 8px; justify-content: flex-end; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Resource Library</h1>
+  <a href="/">Home</a>
+</header>
+
+<div class="search-bar">
+  <input type="text" id="searchInput" placeholder="Search files across all folders..." />
+</div>
+
+<div class="breadcrumb" id="breadcrumb"></div>
+
+<div class="container">
+  <div class="toolbar" id="toolbar">
+    <button class="btn btn-primary" id="newFolderBtn">+ New Folder</button>
+    <button class="btn btn-primary" id="uploadBtn">Upload File</button>
+    <input type="file" id="fileInput" accept=".pdf,.pptx,.docx,.png,.jpg,.jpeg" style="display:none" />
+  </div>
+
+  <div id="searchResults" style="display:none"></div>
+  <div class="grid" id="content"></div>
+</div>
+
+<div class="modal-bg" id="modalBg">
+  <div class="modal-box">
+    <h3 id="modalTitle">New Folder</h3>
+    <input type="text" id="modalInput" placeholder="Folder name" />
+    <div class="modal-btns">
+      <button class="btn" id="modalCancel">Cancel</button>
+      <button class="btn btn-primary" id="modalConfirm">Create</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let currentFolderId = 'root';
+let tree = null;
+
+const content = document.getElementById('content');
+const breadcrumb = document.getElementById('breadcrumb');
+const searchInput = document.getElementById('searchInput');
+const searchResults = document.getElementById('searchResults');
+const fileInput = document.getElementById('fileInput');
+const modalBg = document.getElementById('modalBg');
+const modalInput = document.getElementById('modalInput');
+const modalTitle = document.getElementById('modalTitle');
+let modalAction = null;
+
+const FILE_ICONS = {
+  'application/pdf': '&#128196;',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation': '&#128202;',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '&#128221;',
+  'image/png': '&#128247;',
+  'image/jpeg': '&#128247;',
+};
+
+function fileIcon(type) { return FILE_ICONS[type] || '&#128196;'; }
+function fileSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / 1048576).toFixed(1) + ' MB';
+}
+
+async function loadFolder(id) {
+  currentFolderId = id;
+  searchInput.value = '';
+  searchResults.style.display = 'none';
+  content.style.display = '';
+
+  const res = await fetch(`/api/resources/folder/${encodeURIComponent(id)}`);
+  const folder = await res.json();
+
+  // Breadcrumb
+  breadcrumb.innerHTML = '';
+  const trail = folder.breadcrumb || [{ id: 'root', name: 'Resources' }];
+  trail.forEach((item, i) => {
+    const span = document.createElement('span');
+    span.textContent = item.name;
+    if (i < trail.length - 1) {
+      span.addEventListener('click', () => loadFolder(item.id));
+    }
+    breadcrumb.appendChild(span);
+    if (i < trail.length - 1) {
+      const sep = document.createElement('span');
+      sep.className = 'sep';
+      sep.textContent = ' > ';
+      breadcrumb.appendChild(sep);
+    }
+  });
+
+  // Content
+  content.innerHTML = '';
+  const folders = folder.children || [];
+  const files = folder.files || [];
+
+  if (folders.length === 0 && files.length === 0) {
+    content.innerHTML = '<div class="empty">This folder is empty. Add folders or upload files.</div>';
+    return;
+  }
+
+  // Folders
+  for (const f of folders) {
+    const card = document.createElement('div');
+    card.className = 'folder-card';
+    if (f.color) card.style.borderLeftColor = f.color;
+    const subCount = (f.children || []).length;
+    const fileCount = (f.files || []).length;
+    card.innerHTML = `
+      <div class="folder-icon">&#128193;</div>
+      <div class="folder-name">${esc(f.name)}</div>
+      <div class="folder-count">${subCount} folders, ${fileCount} files</div>
+      <div class="folder-actions">
+        <button data-action="rename" data-id="${f.id}">Rename</button>
+        <button data-action="delete" data-id="${f.id}">Delete</button>
+      </div>
+    `;
+    card.addEventListener('click', (e) => {
+      if (e.target.tagName === 'BUTTON') return;
+      loadFolder(f.id);
+    });
+    card.querySelector('[data-action="rename"]').addEventListener('click', () => openRenameModal(f));
+    card.querySelector('[data-action="delete"]').addEventListener('click', () => deleteFolder(f));
+    content.appendChild(card);
+  }
+
+  // Files
+  for (const f of files) {
+    const card = document.createElement('div');
+    card.className = 'file-card';
+    const isPdf = f.type === 'application/pdf';
+    card.innerHTML = `
+      <div class="file-icon">${fileIcon(f.type)}</div>
+      <div class="file-name">${esc(f.name)}</div>
+      <div class="file-meta">${fileSize(f.size)} &middot; ${new Date(f.uploaded).toLocaleDateString()}</div>
+      <div class="file-actions">
+        ${isPdf ? `<button class="open-btn" data-action="open">Open in Whiteboard</button>` : `<button data-action="download">Download</button>`}
+        <button data-action="delfile">Delete</button>
+      </div>
+    `;
+    if (isPdf) {
+      card.querySelector('[data-action="open"]').addEventListener('click', () => {
+        window.location.href = `/teach?resource=${encodeURIComponent(currentFolderId)}&file=${encodeURIComponent(f.name)}`;
+      });
+    } else {
+      card.querySelector('[data-action="download"]').addEventListener('click', () => {
+        window.open(`/api/resources/file/${encodeURIComponent(currentFolderId)}/${encodeURIComponent(f.name)}`);
+      });
+    }
+    card.querySelector('[data-action="delfile"]').addEventListener('click', () => deleteFile(f));
+    content.appendChild(card);
+  }
+}
+
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+// --- New Folder ---
+document.getElementById('newFolderBtn').addEventListener('click', () => {
+  modalTitle.textContent = 'New Folder';
+  modalInput.value = '';
+  modalInput.placeholder = 'Folder name';
+  document.getElementById('modalConfirm').textContent = 'Create';
+  modalAction = 'create';
+  modalBg.classList.add('visible');
+  setTimeout(() => modalInput.focus(), 50);
+});
+
+function openRenameModal(folder) {
+  modalTitle.textContent = 'Rename Folder';
+  modalInput.value = folder.name;
+  modalInput.placeholder = 'New name';
+  document.getElementById('modalConfirm').textContent = 'Rename';
+  modalAction = { type: 'rename', id: folder.id };
+  modalBg.classList.add('visible');
+  setTimeout(() => modalInput.focus(), 50);
+}
+
+document.getElementById('modalCancel').addEventListener('click', () => modalBg.classList.remove('visible'));
+modalBg.addEventListener('click', (e) => { if (e.target === modalBg) modalBg.classList.remove('visible'); });
+
+document.getElementById('modalConfirm').addEventListener('click', async () => {
+  const name = modalInput.value.trim();
+  if (!name) return;
+  modalBg.classList.remove('visible');
+
+  if (modalAction === 'create') {
+    await fetch(`/api/resources/folder/${encodeURIComponent(currentFolderId)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+  } else if (modalAction && modalAction.type === 'rename') {
+    await fetch(`/api/resources/folder/${encodeURIComponent(modalAction.id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+  }
+  loadFolder(currentFolderId);
+});
+
+modalInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') document.getElementById('modalConfirm').click();
+  if (e.key === 'Escape') modalBg.classList.remove('visible');
+});
+
+async function deleteFolder(folder) {
+  if (!confirm(`Delete folder "${folder.name}" and all its contents?`)) return;
+  await fetch(`/api/resources/folder/${encodeURIComponent(folder.id)}`, { method: 'DELETE' });
+  loadFolder(currentFolderId);
+}
+
+// --- Upload ---
+document.getElementById('uploadBtn').addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', async () => {
+  if (!fileInput.files.length) return;
+  const fd = new FormData();
+  fd.append('file', fileInput.files[0]);
+  await fetch(`/api/resources/upload/${encodeURIComponent(currentFolderId)}`, { method: 'POST', body: fd });
+  fileInput.value = '';
+  loadFolder(currentFolderId);
+});
+
+async function deleteFile(file) {
+  if (!confirm(`Delete "${file.name}"?`)) return;
+  await fetch(`/api/resources/file/${encodeURIComponent(currentFolderId)}/${encodeURIComponent(file.name)}`, { method: 'DELETE' });
+  loadFolder(currentFolderId);
+}
+
+// --- Search ---
+let searchTimeout = null;
+searchInput.addEventListener('input', () => {
+  clearTimeout(searchTimeout);
+  const q = searchInput.value.trim();
+  if (q.length < 2) {
+    searchResults.style.display = 'none';
+    content.style.display = '';
+    return;
+  }
+  searchTimeout = setTimeout(async () => {
+    const res = await fetch(`/api/resources/search?q=${encodeURIComponent(q)}`);
+    const results = await res.json();
+    content.style.display = 'none';
+    searchResults.style.display = '';
+    searchResults.innerHTML = '';
+    if (results.length === 0) {
+      searchResults.innerHTML = '<div class="empty">No files found.</div>';
+      return;
+    }
+    for (const r of results) {
+      const div = document.createElement('div');
+      div.className = 'search-result';
+      div.innerHTML = `<div class="file-name">${esc(r.name)}</div><div class="search-path">${esc(r.folderPath)}</div>`;
+      div.addEventListener('click', () => loadFolder(r.folderId));
+      searchResults.appendChild(div);
+    }
+  }, 300);
+});
+
+// Init
+loadFolder('root');
+</script>
+</body>
+</html>
