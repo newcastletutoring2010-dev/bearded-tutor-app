@@ -197,6 +197,38 @@
   }
   .tool-btn.active { border-color: #2196F3; background: #e3f2fd; color: #2196F3; }
 
+  /* --- Selection overlay --- */
+  #selectionRect {
+    display: none;
+    position: absolute;
+    border: 2px dashed #2196F3;
+    background: rgba(33,150,243,0.08);
+    z-index: 3;
+    pointer-events: none;
+  }
+  #selActionBar {
+    display: none;
+    position: absolute;
+    z-index: 4;
+    background: rgba(255,255,255,0.95);
+    border-radius: 8px;
+    padding: 4px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.18);
+    gap: 4px;
+  }
+  #selActionBar.visible { display: flex; }
+  .sel-btn {
+    padding: 6px 10px;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    background: #fff;
+    font-size: 0.75rem;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .sel-btn:hover { background: #e3f2fd; }
+
   /* --- Whiteboard page nav --- */
   #wbPageNav {
     position: fixed;
@@ -440,9 +472,16 @@
   <div class="brush-row">
     <button class="eraser-btn" id="eraserBtn" title="Eraser">ERS</button>
     <button class="tool-btn" id="textToolBtn" title="Text">T</button>
+    <button class="tool-btn" id="selectToolBtn" title="Select">&#9633;</button>
   </div>
 </div>
 <textarea id="textInput" rows="1"></textarea>
+<div id="selectionRect"></div>
+<div id="selActionBar">
+  <button class="sel-btn" id="selCopyBtn">Copy to other page</button>
+  <button class="sel-btn" id="selMoveBtn">Move to other page</button>
+  <button class="sel-btn" id="selCancelBtn">Cancel</button>
+</div>
 
 <div id="pdfControls">
   <div class="pdf-ctrl-row">
@@ -567,6 +606,10 @@ let eraserMode = false;
 let erasedAny = false;
 let textMode = false;
 let textInputActive = false;
+let selectMode = false;
+let selStartPt = null;   // canvas-space start of selection drag
+let selEndPt = null;      // canvas-space end of selection drag
+let selDragging = false;
 
 // --- Undo / Redo history ---
 // Per-page history: Map of pageKey → { states: [strokes[]], index: number }
@@ -587,6 +630,7 @@ function deepCopyStrokes(arr) {
     const c = { points: s.points.map(p => ({ ...p })), color: s.color, size: s.size };
     if (s.text) c.text = s.text;
     if (s._time) c._time = s._time;
+    if (s.image) { c.image = s.image; c.w = s.w; c.h = s.h; }
     return c;
   });
 }
@@ -714,6 +758,7 @@ function normaliseStroke(s, w, h) {
   w = w || window.innerWidth; h = h || window.innerHeight;
   const out = { points: s.points.map(p => ({ x: p.x / w, y: p.y / h })), color: s.color, size: s.size / h };
   if (s.text) out.text = s.text;
+  if (s.image) { out.image = s.image; out.w = s.w / w; out.h = s.h / h; }
   return out;
 }
 
@@ -722,6 +767,7 @@ function denormaliseStroke(s, w, h) {
   w = w || window.innerWidth; h = h || window.innerHeight;
   const out = { points: s.points.map(p => ({ x: p.x * w, y: p.y * h })), color: s.color, size: s.size * h };
   if (s.text) out.text = s.text;
+  if (s.image) { out.image = s.image; out.w = s.w * w; out.h = s.h * h; }
   return out;
 }
 
@@ -753,6 +799,20 @@ function sendViewport() {
 
 // --- Drawing helpers ---
 function drawStroke(stroke) {
+  // Handle image strokes (from select-and-copy)
+  if (stroke.image) {
+    const pt = stroke.points[0];
+    if (!stroke._imgEl) {
+      stroke._imgEl = new Image();
+      stroke._imgEl.src = stroke.image;
+      stroke._imgEl.onload = () => redraw();
+    }
+    if (stroke._imgEl.complete && stroke._imgEl.naturalWidth > 0) {
+      ctx.drawImage(stroke._imgEl, pt.x, pt.y, stroke.w, stroke.h);
+    }
+    return;
+  }
+
   // Handle text strokes (from calculator answers)
   if (stroke.text) {
     const pt = stroke.points[0];
@@ -788,7 +848,17 @@ function redrawPanel(side) {
   const p = panels[side];
   p.ctx.clearRect(0, 0, p.canvas.width, p.canvas.height);
   for (const s of p.strokes) {
-    if (s.text) {
+    if (s.image) {
+      const pt = s.points[0];
+      if (!s._imgEl) {
+        s._imgEl = new Image();
+        s._imgEl.src = s.image;
+        s._imgEl.onload = () => redrawPanel(side);
+      }
+      if (s._imgEl.complete && s._imgEl.naturalWidth > 0) {
+        p.ctx.drawImage(s._imgEl, pt.x, pt.y, s.w, s.h);
+      }
+    } else if (s.text) {
       const pt = s.points[0];
       p.ctx.save();
       p.ctx.font = `bold ${s.size}px -apple-system, BlinkMacSystemFont, sans-serif`;
@@ -822,6 +892,11 @@ function updateEraserCursor() {
 
 // Check if a point (px, py) with radius hits any segment of a stroke
 function strokeIntersectsPoint(stroke, px, py, radius) {
+  if (stroke.image) {
+    const pt = stroke.points[0];
+    return px > pt.x - radius && px < pt.x + stroke.w + radius &&
+           py > pt.y - radius && py < pt.y + stroke.h + radius;
+  }
   if (stroke.text) {
     const tp = stroke.points[0];
     const textW = stroke.size * String(stroke.text).length * 0.6;
@@ -879,6 +954,15 @@ function detectPanel(e) {
       return;
     }
 
+    if (selectMode) {
+      selDragging = true;
+      selStartPt = toCanvas(e.clientX, e.clientY);
+      selEndPt = { ...selStartPt };
+      hideSelActionBar();
+      panels[activePanel].canvas.setPointerCapture(e.pointerId);
+      return;
+    }
+
     drawing = true;
     panels[activePanel].canvas.setPointerCapture(e.pointerId);
 
@@ -893,6 +977,13 @@ function detectPanel(e) {
 
 ['left', 'right'].forEach(side => {
   panels[side].canvas.addEventListener('pointermove', (e) => {
+    if (selDragging) {
+      e.preventDefault();
+      selEndPt = toCanvas(e.clientX, e.clientY);
+      drawSelectionRect();
+      return;
+    }
+
     if (!drawing) return;
     e.preventDefault();
 
@@ -917,6 +1008,14 @@ function detectPanel(e) {
   });
 
   panels[side].canvas.addEventListener('pointerup', (e) => {
+    if (selDragging) {
+      e.preventDefault();
+      selDragging = false;
+      selEndPt = toCanvas(e.clientX, e.clientY);
+      finaliseSelection();
+      return;
+    }
+
     if (!drawing) return;
     e.preventDefault();
     drawing = false;
@@ -1270,12 +1369,15 @@ COLORS.forEach((c) => {
     currentColor = c.value;
     colorRow.querySelectorAll('.color-btn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
-    // Exit eraser/text mode when a colour is selected
+    // Exit eraser/text/select mode when a colour is selected
     eraserMode = false;
     textMode = false;
+    selectMode = false;
     document.getElementById('eraserBtn').classList.remove('active');
     document.getElementById('textToolBtn').classList.remove('active');
+    document.getElementById('selectToolBtn').classList.remove('active');
     cancelTextInput();
+    hideSelectionUI();
     canvas.style.cursor = 'crosshair';
   });
   colorRow.appendChild(btn);
@@ -1285,8 +1387,11 @@ COLORS.forEach((c) => {
 document.getElementById('eraserBtn').addEventListener('click', () => {
   eraserMode = !eraserMode;
   textMode = false;
+  selectMode = false;
   document.getElementById('textToolBtn').classList.remove('active');
+  document.getElementById('selectToolBtn').classList.remove('active');
   cancelTextInput();
+  hideSelectionUI();
   const btn = document.getElementById('eraserBtn');
   btn.classList.toggle('active', eraserMode);
   if (eraserMode) {
@@ -1304,20 +1409,220 @@ let textPlaceX = 0, textPlaceY = 0; // canvas-space coords where text will be pl
 function exitAllModes() {
   eraserMode = false;
   textMode = false;
+  selectMode = false;
   textInputActive = false;
   document.getElementById('eraserBtn').classList.remove('active');
   textToolBtn.classList.remove('active');
+  document.getElementById('selectToolBtn').classList.remove('active');
   canvas.style.cursor = 'crosshair';
   textInput.style.display = 'none';
+  hideSelectionUI();
 }
 
 textToolBtn.addEventListener('click', () => {
   textMode = !textMode;
   eraserMode = false;
+  selectMode = false;
   document.getElementById('eraserBtn').classList.remove('active');
+  document.getElementById('selectToolBtn').classList.remove('active');
   textToolBtn.classList.toggle('active', textMode);
   canvas.style.cursor = textMode ? 'text' : 'crosshair';
   if (!textMode) cancelTextInput();
+  hideSelectionUI();
+});
+
+// --- Select tool ---
+const selectToolBtn = document.getElementById('selectToolBtn');
+const selectionRectEl = document.getElementById('selectionRect');
+const selActionBar = document.getElementById('selActionBar');
+let selSourcePanel = null; // which panel the selection was made on
+
+selectToolBtn.addEventListener('click', () => {
+  selectMode = !selectMode;
+  eraserMode = false;
+  textMode = false;
+  document.getElementById('eraserBtn').classList.remove('active');
+  textToolBtn.classList.remove('active');
+  selectToolBtn.classList.toggle('active', selectMode);
+  cancelTextInput();
+  hideSelectionUI();
+  canvas.style.cursor = selectMode ? 'crosshair' : 'crosshair';
+});
+
+function hideSelectionUI() {
+  selectionRectEl.style.display = 'none';
+  selActionBar.classList.remove('visible');
+  selStartPt = null;
+  selEndPt = null;
+}
+
+function hideSelActionBar() {
+  selActionBar.classList.remove('visible');
+}
+
+function drawSelectionRect() {
+  if (!selStartPt || !selEndPt) return;
+  const rect = panels[activePanel].el.getBoundingClientRect();
+  const x1 = Math.min(selStartPt.x, selEndPt.x) * zoom + panX + rect.left;
+  const y1 = Math.min(selStartPt.y, selEndPt.y) * zoom + panY + rect.top;
+  const x2 = Math.max(selStartPt.x, selEndPt.x) * zoom + panX + rect.left;
+  const y2 = Math.max(selStartPt.y, selEndPt.y) * zoom + panY + rect.top;
+  selectionRectEl.style.display = 'block';
+  selectionRectEl.style.left = x1 + 'px';
+  selectionRectEl.style.top = y1 + 'px';
+  selectionRectEl.style.width = (x2 - x1) + 'px';
+  selectionRectEl.style.height = (y2 - y1) + 'px';
+}
+
+function finaliseSelection() {
+  if (!selStartPt || !selEndPt) return;
+  const w = Math.abs(selEndPt.x - selStartPt.x);
+  const h = Math.abs(selEndPt.y - selStartPt.y);
+  if (w < 10 || h < 10) { hideSelectionUI(); return; }
+
+  selSourcePanel = activePanel;
+  drawSelectionRect();
+
+  // Position action bar below the selection
+  const rect = panels[activePanel].el.getBoundingClientRect();
+  const barX = Math.min(selStartPt.x, selEndPt.x) * zoom + panX + rect.left;
+  const barY = Math.max(selStartPt.y, selEndPt.y) * zoom + panY + rect.top + 8;
+  selActionBar.style.left = barX + 'px';
+  selActionBar.style.top = barY + 'px';
+  selActionBar.classList.add('visible');
+}
+
+function captureSelectionImage() {
+  const p = panels[selSourcePanel || activePanel];
+  const x = Math.min(selStartPt.x, selEndPt.x);
+  const y = Math.min(selStartPt.y, selEndPt.y);
+  const w = Math.abs(selEndPt.x - selStartPt.x);
+  const h = Math.abs(selEndPt.y - selStartPt.y);
+
+  // Composite both canvases (PDF + strokes) into an offscreen canvas
+  const dpr = window.devicePixelRatio || 1;
+  const off = document.createElement('canvas');
+  off.width = w * dpr;
+  off.height = h * dpr;
+  const oc = off.getContext('2d');
+  oc.scale(dpr, dpr);
+
+  // Draw PDF layer if visible
+  if (p.pdfCanvas.style.display !== 'none') {
+    oc.drawImage(p.pdfCanvas, x * dpr, y * dpr, w * dpr, h * dpr, 0, 0, w, h);
+  }
+  // Draw strokes layer
+  oc.drawImage(p.canvas, x * dpr, y * dpr, w * dpr, h * dpr, 0, 0, w, h);
+
+  return { dataUrl: off.toDataURL('image/png'), x, y, w, h };
+}
+
+function pasteImageToPanel(targetSide, imgData, isCut) {
+  const tp = panels[targetSide];
+  const targetRect = tp.el.getBoundingClientRect();
+  const sourceRect = panels[selSourcePanel || activePanel].el.getBoundingClientRect();
+
+  // Scale the image proportionally for the target panel
+  const scaleX = targetRect.width / sourceRect.width;
+  const scaleY = targetRect.height / sourceRect.height;
+  const px = imgData.x * scaleX;
+  const py = imgData.y * scaleY;
+  const pw = imgData.w * scaleX;
+  const ph = imgData.h * scaleY;
+
+  const imageStroke = {
+    points: [{ x: px, y: py }],
+    color: '#000',
+    size: 1,
+    image: imgData.dataUrl,
+    w: pw,
+    h: ph,
+    _time: Date.now(),
+  };
+
+  // Switch to target panel context temporarily
+  const prevPanel = activePanel;
+  setActivePanel(targetSide);
+  strokes.push(imageStroke);
+  redraw();
+  sendStroke(imageStroke);
+  pushHistory();
+  saveAnnotations();
+
+  // If cutting, remove source strokes that overlap the selection
+  if (isCut) {
+    setActivePanel(selSourcePanel || prevPanel);
+    const sx = Math.min(selStartPt.x, selEndPt.x);
+    const sy = Math.min(selStartPt.y, selEndPt.y);
+    const sw = Math.abs(selEndPt.x - selStartPt.x);
+    const sh = Math.abs(selEndPt.y - selStartPt.y);
+    // Clear the selected region by redrawing with a white rect
+    ctx.save();
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(sx, sy, sw, sh);
+    ctx.restore();
+    pushHistory();
+    syncToServer();
+    saveAnnotations();
+    setActivePanel(targetSide);
+  }
+
+  setActivePanel(prevPanel);
+  hideSelectionUI();
+}
+
+// Action bar button handlers
+document.getElementById('selCopyBtn').addEventListener('click', () => {
+  const imgData = captureSelectionImage();
+  const targetSide = (selSourcePanel === 'left') ? 'right' : 'left';
+  if (!isSplitView) {
+    // In single view, copy to the next page
+    const idx = wbPageOrder.indexOf(currentPageId);
+    if (idx < wbPageOrder.length - 1) {
+      navigateToPage(wbPageOrder[idx + 1]);
+    }
+    const imageStroke = {
+      points: [{ x: imgData.x, y: imgData.y }],
+      color: '#000', size: 1,
+      image: imgData.dataUrl, w: imgData.w, h: imgData.h, _time: Date.now(),
+    };
+    strokes.push(imageStroke);
+    redraw();
+    sendStroke(imageStroke);
+    pushHistory();
+    saveAnnotations();
+    hideSelectionUI();
+  } else {
+    pasteImageToPanel(targetSide, imgData, false);
+  }
+});
+
+document.getElementById('selMoveBtn').addEventListener('click', () => {
+  const imgData = captureSelectionImage();
+  const targetSide = (selSourcePanel === 'left') ? 'right' : 'left';
+  if (!isSplitView) {
+    const idx = wbPageOrder.indexOf(currentPageId);
+    if (idx < wbPageOrder.length - 1) {
+      navigateToPage(wbPageOrder[idx + 1]);
+    }
+    const imageStroke = {
+      points: [{ x: imgData.x, y: imgData.y }],
+      color: '#000', size: 1,
+      image: imgData.dataUrl, w: imgData.w, h: imgData.h, _time: Date.now(),
+    };
+    strokes.push(imageStroke);
+    redraw();
+    sendStroke(imageStroke);
+    pushHistory();
+    saveAnnotations();
+    hideSelectionUI();
+  } else {
+    pasteImageToPanel(targetSide, imgData, true);
+  }
+});
+
+document.getElementById('selCancelBtn').addEventListener('click', () => {
+  hideSelectionUI();
 });
 
 function getTextFontSize() {

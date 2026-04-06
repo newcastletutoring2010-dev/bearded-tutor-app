@@ -248,6 +248,7 @@ wss.on('connection', (ws) => {
         const s = getPageStrokes(pid);
         const strokeData = { points: msg.points, color: msg.color, size: msg.size };
         if (msg.text) strokeData.text = msg.text;
+        if (msg.image) { strokeData.image = msg.image; strokeData.w = msg.w; strokeData.h = msg.h; }
         s.push(strokeData);
         if (!paused) {
           broadcast({ type: 'stroke', pageId: pid, ...strokeData }, 'teacher');
