@@ -258,6 +258,29 @@
   }
   .wb-nav-btn:disabled { opacity: 0.3; cursor: default; }
   #wbPageIndicator { font-size: 0.85rem; font-weight: 600; color: #555; min-width: 50px; text-align: center; }
+  .wb-nav-btn.danger { color: #e74c3c; }
+  .wb-nav-btn.danger:disabled { color: #e74c3c; }
+
+  #deleteConfirm {
+    display: none;
+    position: fixed;
+    bottom: 120px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(255,255,255,0.95);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    border-radius: 10px;
+    padding: 10px 14px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.15);
+    z-index: 20;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 0.85rem;
+    font-weight: 500;
+    align-items: center;
+    gap: 10px;
+  }
+  #deleteConfirm.visible { display: flex; }
 
   #textInput {
     display: none;
@@ -507,7 +530,13 @@
   <span id="wbPageIndicator">1 / 1</span>
   <button class="wb-nav-btn" id="nextWbPage">&rarr;</button>
   <button class="wb-nav-btn" id="addWbPage">+ Page</button>
+  <button class="wb-nav-btn danger" id="deleteWbPage" title="Delete Page">&#x2715;</button>
   <button class="wb-nav-btn" id="splitViewBtn">Split</button>
+</div>
+<div id="deleteConfirm">
+  <span id="deleteConfirmText">Delete page 1 of 1?</span>
+  <button class="wb-nav-btn danger" id="deleteConfirmBtn">Delete</button>
+  <button class="wb-nav-btn" id="deleteCancelBtn">Cancel</button>
 </div>
 
 <div id="controls">
@@ -1127,6 +1156,17 @@ ws.addEventListener('message', async (e) => {
     navigateToPage(msg.pageId, false);
   }
 
+  if (msg.type === 'wb-page-delete') {
+    if (msg.pageOrder) wbPageOrder = msg.pageOrder;
+    delete wbPages[msg.pageId];
+    historyMap.delete(msg.pageId);
+    if (currentPageId === msg.pageId && msg.newActivePageId) {
+      navigateToPage(msg.newActivePageId, false);
+    }
+    updateWbPageNav();
+    updatePanelLabels();
+  }
+
   if (msg.type === 'wb-split-toggle') {
     // Sync split view state from another teacher instance
     isSplitView = msg.enabled;
@@ -1221,6 +1261,7 @@ function updateWbPageNav() {
   document.getElementById('wbPageIndicator').textContent = (idx + 1) + ' / ' + total;
   document.getElementById('prevWbPage').disabled = idx <= 0;
   document.getElementById('nextWbPage').disabled = idx >= total - 1;
+  if (typeof updateDeleteButton === 'function') updateDeleteButton();
 }
 
 function navigateToPage(pageId, broadcast = true) {
@@ -1280,6 +1321,58 @@ document.getElementById('addWbPage').addEventListener('click', () => {
     ws.send(JSON.stringify({ type: 'wb-page-add', pageId: newId, afterPageId: currentPageId, pageType: 'blank' }));
   }
   navigateToPage(newId);
+});
+
+// --- Delete page ---
+const deleteWbPageBtn = document.getElementById('deleteWbPage');
+const deleteConfirmEl = document.getElementById('deleteConfirm');
+const deleteConfirmText = document.getElementById('deleteConfirmText');
+
+function updateDeleteButton() {
+  deleteWbPageBtn.disabled = wbPageOrder.length <= 1;
+  deleteWbPageBtn.style.opacity = wbPageOrder.length <= 1 ? '0.3' : '1';
+}
+
+deleteWbPageBtn.addEventListener('click', () => {
+  if (wbPageOrder.length <= 1) return;
+  const idx = wbPageOrder.indexOf(currentPageId);
+  deleteConfirmText.textContent = `Delete page ${idx + 1} of ${wbPageOrder.length}?`;
+  deleteConfirmEl.classList.add('visible');
+});
+
+document.getElementById('deleteCancelBtn').addEventListener('click', () => {
+  deleteConfirmEl.classList.remove('visible');
+});
+
+document.getElementById('deleteConfirmBtn').addEventListener('click', () => {
+  deleteConfirmEl.classList.remove('visible');
+  if (wbPageOrder.length <= 1) return;
+
+  const pageToDelete = currentPageId;
+  const idx = wbPageOrder.indexOf(pageToDelete);
+
+  // Navigate away first — to previous page, or next if deleting first
+  const targetIdx = idx > 0 ? idx - 1 : 1;
+  const targetPageId = wbPageOrder[targetIdx];
+  navigateToPage(targetPageId, false);
+
+  // Remove from local state
+  wbPageOrder.splice(wbPageOrder.indexOf(pageToDelete), 1);
+  delete wbPages[pageToDelete];
+  historyMap.delete(pageToDelete);
+
+  updateWbPageNav();
+  updateDeleteButton();
+  updatePanelLabels();
+
+  // Tell server
+  if (ws.readyState === 1) {
+    ws.send(JSON.stringify({
+      type: 'wb-page-delete',
+      pageId: pageToDelete,
+      newActivePageId: currentPageId,
+    }));
+  }
 });
 
 // --- Split view toggle ---

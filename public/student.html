@@ -443,6 +443,35 @@ ws.addEventListener('message', async (e) => {
     case 'wb-page-add':
       break;
 
+    case 'wb-page-delete': {
+      delete wbPages[msg.pageId];
+      // If we're displaying the deleted page, navigate to the new active page
+      if (displayedPageId === msg.pageId || panels.left.pageId === msg.pageId) {
+        displayedPageId = msg.newActivePageId;
+        panels.left.pageId = msg.newActivePageId;
+        const pd = wbPages[msg.newActivePageId];
+        panels.left.strokes = pd ? (pd.strokes || []).map(s => denormaliseForPanel(s, 'left')) : [];
+        redrawPanel('left');
+        // Handle PDF page rendering for the new page
+        const pm = (msg.newActivePageId || '').match(/^pdf_.*_(\d+)$/);
+        if (pm && pdfDoc) {
+          pdfPageNum = parseInt(pm[1], 10);
+          renderPdfPageOn('left').catch(() => {});
+          panels.left.pdfCanvas.style.display = 'block';
+        } else {
+          panels.left.pdfCanvas.style.display = 'none';
+        }
+      }
+      if (isSplitView && panels.right.pageId === msg.pageId) {
+        // Right panel was showing deleted page — show the new active page
+        panels.right.pageId = msg.newActivePageId;
+        const pd = wbPages[msg.newActivePageId];
+        panels.right.strokes = pd ? (pd.strokes || []).map(s => denormaliseForPanel(s, 'right')) : [];
+        redrawPanel('right');
+      }
+      break;
+    }
+
     case 'wb-page-change': {
       displayedPageId = msg.pageId;
       panels.left.pageId = msg.pageId;

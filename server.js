@@ -228,6 +228,17 @@ wss.on('connection', (ws) => {
         broadcast({ type: 'wb-page-change', pageId: msg.pageId }, 'teacher');
         break;
 
+      case 'wb-page-delete': {
+        const delId = msg.pageId;
+        if (pageOrder.length <= 1) break; // cannot delete last page
+        delete pages[delId];
+        const delIdx = pageOrder.indexOf(delId);
+        if (delIdx !== -1) pageOrder.splice(delIdx, 1);
+        activePageId = msg.newActivePageId || pageOrder[0];
+        broadcast({ type: 'wb-page-delete', pageId: delId, newActivePageId: activePageId, pageOrder }, 'teacher');
+        break;
+      }
+
       // --- Split view ---
       case 'wb-split-toggle':
         splitView = msg.enabled;
