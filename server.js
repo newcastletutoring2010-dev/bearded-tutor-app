@@ -160,6 +160,11 @@ let currentPdf = { student: null, filename: null, page: 1, totalPages: 0 };
 // --- Viewport State ---
 let currentViewport = { zoom: 1, panX: 0, panY: 0 };
 
+// --- Split View State ---
+let splitView = false;
+let splitLeftPageId = 'wb_1';
+let splitRightPageId = null;
+
 function broadcast(data, senderRole) {
   const msg = JSON.stringify(data);
   for (const client of wss.clients) {
@@ -199,6 +204,9 @@ wss.on('connection', (ws) => {
           paused,
           currentPdf,
           currentViewport,
+          splitView,
+          splitLeftPageId,
+          splitRightPageId,
         }));
         break;
 
@@ -218,6 +226,20 @@ wss.on('connection', (ws) => {
       case 'wb-page-change':
         activePageId = msg.pageId;
         broadcast({ type: 'wb-page-change', pageId: msg.pageId }, 'teacher');
+        break;
+
+      // --- Split view ---
+      case 'wb-split-toggle':
+        splitView = msg.enabled;
+        splitLeftPageId = msg.leftPageId;
+        splitRightPageId = msg.rightPageId;
+        broadcast({ type: 'wb-split-toggle', enabled: msg.enabled, leftPageId: msg.leftPageId, rightPageId: msg.rightPageId }, 'teacher');
+        break;
+
+      case 'wb-split-change':
+        if (msg.panel === 'left') splitLeftPageId = msg.pageId;
+        if (msg.panel === 'right') splitRightPageId = msg.pageId;
+        broadcast({ type: 'wb-split-change', panel: msg.panel, pageId: msg.pageId }, 'teacher');
         break;
 
       // --- Per-page stroke operations (all carry pageId) ---

@@ -9,20 +9,37 @@
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { width: 100%; height: 100%; overflow: hidden; background: #fff; }
 
-  #pdfCanvas {
+  #panelContainer {
+    display: flex;
+    width: 100%; height: 100%;
+    position: absolute;
+    top: 0; left: 0;
+  }
+  .panel {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+  }
+  .panel.hidden-panel { display: none; }
+  .panel .canvasWrap {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    transform-origin: 0 0;
+    transition: transform 0.05s linear;
+  }
+  .panel .pdfCanvas {
     display: none;
     position: absolute;
     top: 0; left: 0;
     width: 100%; height: 100%;
     z-index: 0;
   }
-
-  #canvas {
+  .panel .drawCanvas {
     display: block;
     position: absolute;
     top: 0; left: 0;
-    width: 100%;
-    height: 100%;
+    width: 100%; height: 100%;
     touch-action: none;
     z-index: 1;
   }
@@ -87,9 +104,19 @@
 </head>
 <body>
 
-<div id="canvasWrap">
-  <canvas id="pdfCanvas"></canvas>
-  <canvas id="canvas"></canvas>
+<div id="panelContainer">
+  <div id="panelLeft" class="panel">
+    <div class="canvasWrap" data-panel="left">
+      <canvas class="pdfCanvas"></canvas>
+      <canvas class="drawCanvas"></canvas>
+    </div>
+  </div>
+  <div id="panelRight" class="panel hidden-panel">
+    <div class="canvasWrap" data-panel="right">
+      <canvas class="pdfCanvas"></canvas>
+      <canvas class="drawCanvas"></canvas>
+    </div>
+  </div>
 </div>
 <div id="status"></div>
 <div id="pdfStatus"></div>
@@ -97,25 +124,32 @@
 <script>
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
-const canvas = document.getElementById('canvas');
-const ctx = canvas.getContext('2d');
-const pdfCanvas = document.getElementById('pdfCanvas');
-const pdfCtx = pdfCanvas.getContext('2d');
 const statusEl = document.getElementById('status');
 const pdfStatusEl = document.getElementById('pdfStatus');
 
-let strokes = [];
+// --- Panel system ---
+function initPanel(el) {
+  const wrap = el.querySelector('.canvasWrap');
+  const draw = el.querySelector('.drawCanvas');
+  const pdf = el.querySelector('.pdfCanvas');
+  return { el, wrap, canvas: draw, ctx: draw.getContext('2d'), pdfCanvas: pdf, pdfCtx: pdf.getContext('2d'), pageId: null, strokes: [] };
+}
+const panels = {
+  left: initPanel(document.getElementById('panelLeft')),
+  right: initPanel(document.getElementById('panelRight')),
+};
+let isSplitView = false;
+
 let paused = false;
 
 // --- Multi-page state ---
-let wbPages = {};           // pageId → { strokes (normalised) }
-let displayedPageId = null; // which page is currently rendered
+let wbPages = {};
+let displayedPageId = null;
 
-// --- Viewport (mirrors teacher zoom/pan) ---
-const canvasWrap = document.getElementById('canvasWrap');
-
+// --- Viewport ---
 function applyViewport(z, px, py) {
-  canvasWrap.style.transform = `translate(${px}px, ${py}px) scale(${z})`;
+  panels.left.wrap.style.transform = `translate(${px}px, ${py}px) scale(${z})`;
+  if (isSplitView) panels.right.wrap.style.transform = `translate(${px}px, ${py}px) scale(${z})`;
 }
 
 // --- PDF state ---
@@ -125,65 +159,77 @@ let pdfStudent = null;
 let pdfFilename = null;
 
 // --- Hi-DPI ---
-function resize() {
+function resizePanel(p) {
   const dpr = window.devicePixelRatio || 1;
-  const w = window.innerWidth;
-  const h = window.innerHeight;
-  canvas.width = w * dpr;
-  canvas.height = h * dpr;
-  canvas.style.width = w + 'px';
-  canvas.style.height = h + 'px';
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  pdfCanvas.width = w * dpr;
-  pdfCanvas.height = h * dpr;
-  pdfCanvas.style.width = w + 'px';
-  pdfCanvas.style.height = h + 'px';
-  pdfCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  redraw();
+  const rect = p.el.getBoundingClientRect();
+  const w = rect.width, h = rect.height;
+  if (w === 0 || h === 0) return;
+  p.canvas.width = w * dpr; p.canvas.height = h * dpr;
+  p.canvas.style.width = w + 'px'; p.canvas.style.height = h + 'px';
+  p.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  p.pdfCanvas.width = w * dpr; p.pdfCanvas.height = h * dpr;
+  p.pdfCanvas.style.width = w + 'px'; p.pdfCanvas.style.height = h + 'px';
+  p.pdfCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function resize() {
+  resizePanel(panels.left);
+  if (isSplitView) resizePanel(panels.right);
+  redrawPanel('left');
+  if (isSplitView) redrawPanel('right');
   if (pdfDoc) renderPdfPage();
 }
 window.addEventListener('resize', resize);
 resize();
 
-// Denormalise a stroke received from the wire (0–1 → local pixel coords)
-function denormaliseStroke(s) {
-  const w = window.innerWidth, h = window.innerHeight;
+// Denormalise using panel dimensions
+function denormaliseStroke(s, w, h) {
+  w = w || window.innerWidth; h = h || window.innerHeight;
   const out = { points: s.points.map(p => ({ x: p.x * w, y: p.y * h })), color: s.color, size: s.size * h };
   if (s.text) out.text = s.text;
   return out;
 }
 
-// --- Drawing ---
-function drawStroke(stroke) {
-  // Handle text strokes (from calculator answers)
-  if (stroke.text) {
-    const pt = stroke.points[0];
-    ctx.save();
-    ctx.font = `bold ${stroke.size}px -apple-system, BlinkMacSystemFont, sans-serif`;
-    ctx.fillStyle = stroke.color || '#000';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(stroke.text, pt.x, pt.y);
-    ctx.restore();
-    return;
-  }
-
-  const pts = stroke.points || stroke;
-  if (pts.length < 2) return;
-  ctx.beginPath();
-  ctx.moveTo(pts[0].x, pts[0].y);
-  for (let i = 1; i < pts.length; i++) {
-    ctx.lineTo(pts[i].x, pts[i].y);
-  }
-  ctx.strokeStyle = stroke.color || '#000';
-  ctx.lineWidth = stroke.size || 2.5;
-  ctx.lineCap = 'round';
-  ctx.lineJoin = 'round';
-  ctx.stroke();
+function denormaliseForPanel(s, side) {
+  const rect = panels[side].el.getBoundingClientRect();
+  return denormaliseStroke(s, rect.width, rect.height);
 }
 
-function redraw() {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  for (const s of strokes) drawStroke(s);
+// --- Drawing ---
+function drawStrokeOn(c, stroke) {
+  if (stroke.text) {
+    const pt = stroke.points[0];
+    c.save();
+    c.font = `bold ${stroke.size}px -apple-system, BlinkMacSystemFont, sans-serif`;
+    c.fillStyle = stroke.color || '#000';
+    c.textBaseline = 'middle';
+    c.fillText(stroke.text, pt.x, pt.y);
+    c.restore();
+    return;
+  }
+  const pts = stroke.points || [];
+  if (pts.length < 2) return;
+  c.beginPath();
+  c.moveTo(pts[0].x, pts[0].y);
+  for (let i = 1; i < pts.length; i++) c.lineTo(pts[i].x, pts[i].y);
+  c.strokeStyle = stroke.color || '#000';
+  c.lineWidth = stroke.size || 2.5;
+  c.lineCap = 'round'; c.lineJoin = 'round';
+  c.stroke();
+}
+
+function redrawPanel(side) {
+  const p = panels[side];
+  p.ctx.clearRect(0, 0, p.canvas.width, p.canvas.height);
+  for (const s of p.strokes) drawStrokeOn(p.ctx, s);
+}
+
+// Find which panel(s) display a given pageId
+function panelsForPage(pageId) {
+  const out = [];
+  if (panels.left.pageId === pageId) out.push('left');
+  if (isSplitView && panels.right.pageId === pageId) out.push('right');
+  return out;
 }
 
 function showStatus(text, cls) {
@@ -211,40 +257,38 @@ async function loadPdf(student, filename) {
   pdfStudent = student;
   pdfFilename = filename;
   const url = `/uploads/${encodeURIComponent(student)}/${encodeURIComponent(filename)}`;
-  const loadingTask = pdfjsLib.getDocument(url);
-  pdfDoc = await loadingTask.promise;
-  pdfCanvas.style.display = 'block';
+  pdfDoc = await pdfjsLib.getDocument(url).promise;
   showPdfStatus(student + ' / ' + filename);
 }
 
-async function renderPdfPage() {
+async function renderPdfPageOn(side) {
   if (!pdfDoc) return;
+  const p = panels[side];
   const pageNum = Math.min(pdfPageNum, pdfDoc.numPages);
   const page = await pdfDoc.getPage(pageNum);
-  const vw = window.innerWidth;
-  const vh = window.innerHeight;
+  const rect = p.el.getBoundingClientRect();
+  const vw = rect.width, vh = rect.height;
   const pdfViewport = page.getViewport({ scale: 1 });
   const scale = Math.min(vw / pdfViewport.width, vh / pdfViewport.height);
   const viewport = page.getViewport({ scale });
 
   const dpr = window.devicePixelRatio || 1;
-  pdfCanvas.width = vw * dpr;
-  pdfCanvas.height = vh * dpr;
-  pdfCanvas.style.width = vw + 'px';
-  pdfCanvas.style.height = vh + 'px';
+  p.pdfCanvas.width = vw * dpr;
+  p.pdfCanvas.height = vh * dpr;
+  p.pdfCanvas.style.width = vw + 'px';
+  p.pdfCanvas.style.height = vh + 'px';
 
-  const renderCtx = pdfCanvas.getContext('2d');
+  const renderCtx = p.pdfCtx;
   renderCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
   renderCtx.clearRect(0, 0, vw, vh);
+  renderCtx.translate((vw - viewport.width) / 2, (vh - viewport.height) / 2);
 
-  const offsetX = (vw - viewport.width) / 2;
-  const offsetY = (vh - viewport.height) / 2;
-  renderCtx.translate(offsetX, offsetY);
+  await page.render({ canvasContext: renderCtx, viewport }).promise;
+  p.pdfCanvas.style.display = 'block';
+}
 
-  await page.render({
-    canvasContext: renderCtx,
-    viewport,
-  }).promise;
+async function renderPdfPage() {
+  await renderPdfPageOn('left');
 }
 
 function closePdf() {
@@ -252,10 +296,12 @@ function closePdf() {
   pdfStudent = null;
   pdfFilename = null;
   pdfPageNum = 1;
-  pdfCanvas.style.display = 'none';
-  const dpr = window.devicePixelRatio || 1;
-  pdfCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  pdfCtx.clearRect(0, 0, pdfCanvas.width, pdfCanvas.height);
+  for (const side of ['left', 'right']) {
+    panels[side].pdfCanvas.style.display = 'none';
+    const dpr = window.devicePixelRatio || 1;
+    panels[side].pdfCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    panels[side].pdfCtx.clearRect(0, 0, panels[side].pdfCanvas.width, panels[side].pdfCanvas.height);
+  }
 }
 
 // --- WebSocket ---
@@ -270,62 +316,96 @@ ws.addEventListener('message', async (e) => {
   const msg = JSON.parse(e.data);
 
   switch (msg.type) {
-    case 'init':
+    case 'init': {
       paused = msg.paused;
-
-      // Store full page data
       if (msg.pages) wbPages = msg.pages;
-      displayedPageId = msg.activePageId || 'wb_1';
 
-      // Load active page strokes
-      const initPage = wbPages[displayedPageId];
-      strokes = initPage ? (initPage.strokes || []).map(denormaliseStroke) : [];
+      // Set up split view state
+      isSplitView = !!msg.splitView;
+      const leftId = msg.splitView ? msg.splitLeftPageId : (msg.activePageId || 'wb_1');
+      const rightId = msg.splitView ? msg.splitRightPageId : null;
 
-      // Apply the teacher's current viewport immediately
+      panels.left.pageId = leftId;
+      displayedPageId = leftId;
+
+      if (isSplitView && rightId) {
+        panels.right.el.classList.remove('hidden-panel');
+        panels.right.pageId = rightId;
+      } else {
+        panels.right.el.classList.add('hidden-panel');
+      }
+
+      // Resize and load strokes for each visible panel
+      resizePanel(panels.left);
+      const lpd = wbPages[leftId];
+      panels.left.strokes = lpd ? (lpd.strokes || []).map(s => denormaliseForPanel(s, 'left')) : [];
+
+      if (isSplitView && rightId) {
+        resizePanel(panels.right);
+        const rpd = wbPages[rightId];
+        panels.right.strokes = rpd ? (rpd.strokes || []).map(s => denormaliseForPanel(s, 'right')) : [];
+      }
+
       if (msg.currentViewport) {
         applyViewport(msg.currentViewport.zoom, msg.currentViewport.panX, msg.currentViewport.panY);
       }
 
-      // If a PDF is currently loaded, render the correct page
       if (msg.currentPdf && msg.currentPdf.student && msg.currentPdf.filename) {
         await loadPdf(msg.currentPdf.student, msg.currentPdf.filename);
-        const pdfMatch = displayedPageId.match(/^pdf_.*_(\d+)$/);
-        pdfPageNum = pdfMatch ? parseInt(pdfMatch[1], 10) : (msg.currentPdf.page || 1);
-        await renderPdfPage();
-        showPdfStatus(msg.currentPdf.student + ' / ' + msg.currentPdf.filename + ' — Page ' + pdfPageNum);
+        // Render PDF on any panel that shows a PDF page
+        for (const side of ['left', 'right']) {
+          if (!isSplitView && side === 'right') continue;
+          const pm = (panels[side].pageId || '').match(/^pdf_.*_(\d+)$/);
+          if (pm && pdfDoc) {
+            pdfPageNum = parseInt(pm[1], 10);
+            await renderPdfPageOn(side);
+            panels[side].pdfCanvas.style.display = 'block';
+          }
+        }
+        showPdfStatus(msg.currentPdf.student + ' / ' + msg.currentPdf.filename);
       }
 
       if (paused && msg.revealedImage) {
         loadSnapshot(msg.revealedImage);
         showStatus('Paused', 'paused');
       } else {
-        redraw();
+        redrawPanel('left');
+        if (isSplitView) redrawPanel('right');
       }
       break;
+    }
 
-    case 'stroke':
+    case 'stroke': {
       if (paused) return;
-      // Only draw if the stroke is for the currently displayed page
-      if (msg.pageId && msg.pageId !== displayedPageId) return;
-      const stroke = denormaliseStroke({ points: msg.points, color: msg.color, size: msg.size, text: msg.text });
-      strokes.push(stroke);
-      drawStroke(stroke);
+      const sides = msg.pageId ? panelsForPage(msg.pageId) : panelsForPage(displayedPageId);
+      if (sides.length === 0) return;
+      for (const side of sides) {
+        const ds = denormaliseForPanel({ points: msg.points, color: msg.color, size: msg.size, text: msg.text }, side);
+        panels[side].strokes.push(ds);
+        drawStrokeOn(panels[side].ctx, ds);
+      }
       break;
+    }
 
-    case 'full-redraw':
+    case 'full-redraw': {
       if (paused) return;
-      // Only redraw if it's for our displayed page
-      if (msg.pageId && msg.pageId !== displayedPageId) return;
-      strokes = (msg.strokes || []).map(denormaliseStroke);
-      redraw();
+      const sides = msg.pageId ? panelsForPage(msg.pageId) : panelsForPage(displayedPageId);
+      for (const side of sides) {
+        panels[side].strokes = (msg.strokes || []).map(s => denormaliseForPanel(s, side));
+        redrawPanel(side);
+      }
       break;
+    }
 
-    case 'clear':
+    case 'clear': {
       if (paused) return;
-      if (msg.pageId && msg.pageId !== displayedPageId) return;
-      strokes = [];
-      redraw();
+      const sides = msg.pageId ? panelsForPage(msg.pageId) : panelsForPage(displayedPageId);
+      for (const side of sides) {
+        panels[side].strokes = [];
+        redrawPanel(side);
+      }
       break;
+    }
 
     case 'paused':
       paused = true;
@@ -336,67 +416,112 @@ ws.addEventListener('message', async (e) => {
       paused = false;
       showStatus('Live', 'live');
       if (msg.strokes) {
-        strokes = msg.strokes.map(denormaliseStroke);
-        redraw();
+        const sides = panelsForPage(displayedPageId);
+        for (const side of sides) {
+          panels[side].strokes = msg.strokes.map(s => denormaliseForPanel(s, side));
+          redrawPanel(side);
+        }
       } else if (msg.snapshot) {
         loadSnapshot(msg.snapshot);
       }
       break;
 
-    // --- Multi-page events ---
     case 'wb-page-add':
-      if (msg.pageOrder) { /* page added, we'll load its strokes on page-change */ }
       break;
 
     case 'wb-page-change': {
       displayedPageId = msg.pageId;
-      // Check if this is a PDF page
-      const pageMatch = msg.pageId.match(/^pdf_(.+)_(.+)_(\d+)$/);
-      if (pageMatch && pdfDoc) {
-        pdfPageNum = parseInt(pageMatch[3], 10);
-        await renderPdfPage();
-        pdfCanvas.style.display = 'block';
+      panels.left.pageId = msg.pageId;
+      const pm = msg.pageId.match(/^pdf_(.+)_(.+)_(\d+)$/);
+      if (pm && pdfDoc) {
+        pdfPageNum = parseInt(pm[3], 10);
+        await renderPdfPageOn('left');
+        panels.left.pdfCanvas.style.display = 'block';
         showPdfStatus('Page ' + pdfPageNum);
-      } else if (!pageMatch) {
-        // Blank whiteboard page — hide PDF
-        pdfCanvas.style.display = 'none';
+      } else if (!pm) {
+        panels.left.pdfCanvas.style.display = 'none';
         const dpr = window.devicePixelRatio || 1;
-        pdfCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-        pdfCtx.clearRect(0, 0, pdfCanvas.width, pdfCanvas.height);
+        panels.left.pdfCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        panels.left.pdfCtx.clearRect(0, 0, panels.left.pdfCanvas.width, panels.left.pdfCanvas.height);
       }
-      // Load strokes for this page from server cache (will arrive via full-redraw)
-      strokes = [];
-      redraw();
+      panels.left.strokes = [];
+      redrawPanel('left');
       break;
     }
 
-    // --- PDF events ---
+    case 'wb-split-toggle': {
+      isSplitView = msg.enabled;
+      if (isSplitView) {
+        panels.right.el.classList.remove('hidden-panel');
+        panels.right.pageId = msg.rightPageId;
+        panels.left.pageId = msg.leftPageId;
+        resizePanel(panels.left);
+        resizePanel(panels.right);
+        const rpd = wbPages[msg.rightPageId];
+        panels.right.strokes = rpd ? (rpd.strokes || []).map(s => denormaliseForPanel(s, 'right')) : [];
+        // Re-denormalise left panel for new width
+        const lpd = wbPages[msg.leftPageId];
+        panels.left.strokes = lpd ? (lpd.strokes || []).map(s => denormaliseForPanel(s, 'left')) : [];
+        redrawPanel('left');
+        redrawPanel('right');
+      } else {
+        panels.right.el.classList.add('hidden-panel');
+        resizePanel(panels.left);
+        redrawPanel('left');
+      }
+      break;
+    }
+
+    case 'wb-split-change': {
+      const side = msg.panel;
+      if (panels[side]) {
+        panels[side].pageId = side === 'left' ? (displayedPageId = msg.pageId) : msg.pageId;
+        const pd = wbPages[msg.pageId];
+        panels[side].strokes = pd ? (pd.strokes || []).map(s => denormaliseForPanel(s, side)) : [];
+        redrawPanel(side);
+        // Handle PDF rendering for this panel
+        const pm = msg.pageId.match(/^pdf_.*_(\d+)$/);
+        if (pm && pdfDoc) {
+          pdfPageNum = parseInt(pm[1], 10);
+          await renderPdfPageOn(side);
+          panels[side].pdfCanvas.style.display = 'block';
+        } else {
+          panels[side].pdfCanvas.style.display = 'none';
+        }
+      }
+      break;
+    }
+
     case 'pdf-load':
-      strokes = [];
-      redraw();
+      panels.left.strokes = [];
+      redrawPanel('left');
       displayedPageId = msg.activePageId || `pdf_${msg.student}_${msg.filename}_${msg.page || 1}`;
+      panels.left.pageId = displayedPageId;
       await loadPdf(msg.student, msg.filename);
       pdfPageNum = msg.page || 1;
-      await renderPdfPage();
+      await renderPdfPageOn('left');
+      panels.left.pdfCanvas.style.display = 'block';
       showPdfStatus(msg.student + ' / ' + msg.filename + ' — Page ' + pdfPageNum);
       break;
 
     case 'pdf-page':
-      strokes = [];
-      redraw();
+      panels.left.strokes = [];
+      redrawPanel('left');
       displayedPageId = msg.activePageId || displayedPageId;
+      panels.left.pageId = displayedPageId;
       pdfPageNum = msg.page;
       if (pdfDoc) {
-        await renderPdfPage();
+        await renderPdfPageOn('left');
         showPdfStatus('Page ' + pdfPageNum);
       }
       break;
 
     case 'pdf-unload':
-      strokes = [];
-      redraw();
+      panels.left.strokes = [];
+      redrawPanel('left');
       closePdf();
       displayedPageId = msg.activePageId || 'wb_1';
+      panels.left.pageId = displayedPageId;
       break;
 
     case 'viewport':
@@ -408,9 +533,11 @@ ws.addEventListener('message', async (e) => {
 function loadSnapshot(dataUrl) {
   if (!dataUrl) return;
   const img = new Image();
+  const c = panels.left.ctx;
+  const cv = panels.left.canvas;
   img.onload = () => {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    c.clearRect(0, 0, cv.width, cv.height);
+    c.drawImage(img, 0, 0, cv.width, cv.height);
   };
   img.src = dataUrl;
 }
