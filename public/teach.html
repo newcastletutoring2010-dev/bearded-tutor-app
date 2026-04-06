@@ -160,6 +160,36 @@
   }
   .tool-btn.active { border-color: #2196F3; background: #e3f2fd; color: #2196F3; }
 
+  /* --- Whiteboard page nav --- */
+  #wbPageNav {
+    position: fixed;
+    bottom: 76px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    z-index: 10;
+    background: rgba(255,255,255,0.92);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    border-radius: 10px;
+    padding: 6px 12px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  }
+  .wb-nav-btn {
+    padding: 6px 10px;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    background: #fff;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .wb-nav-btn:disabled { opacity: 0.3; cursor: default; }
+  #wbPageIndicator { font-size: 0.85rem; font-weight: 600; color: #555; min-width: 50px; text-align: center; }
+
   #textInput {
     display: none;
     position: absolute;
@@ -384,6 +414,13 @@
   </div>
 </div>
 
+<div id="wbPageNav">
+  <button class="wb-nav-btn" id="prevWbPage" disabled>&larr;</button>
+  <span id="wbPageIndicator">1 / 1</span>
+  <button class="wb-nav-btn" id="nextWbPage">&rarr;</button>
+  <button class="wb-nav-btn" id="addWbPage">+ Page</button>
+</div>
+
 <div id="controls">
   <button id="pauseBtn">Pause</button>
   <button id="revealBtn">Reveal</button>
@@ -418,6 +455,12 @@ let currentStroke = [];
 let drawing = false;
 let paused = false;
 let holdTimer = null;
+
+// --- Multi-page state ---
+let wbPages = {};          // pageId → { strokes (normalised from server) }
+let wbPageOrder = ['wb_1'];
+let currentPageId = 'wb_1';
+
 let eraserMode = false;
 let erasedAny = false;
 let textMode = false;
@@ -428,8 +471,7 @@ let textInputActive = false;
 const historyMap = new Map();
 
 function getPageKey() {
-  if (pdfDoc && pdfStudent && pdfFilename) return `${pdfStudent}/${pdfFilename}/${pdfPageNum}`;
-  return '_wb_';
+  return currentPageId;
 }
 
 function getHistory() {
@@ -463,7 +505,7 @@ function resetHistory() {
 
 function syncToServer() {
   if (ws.readyState === 1) {
-    ws.send(JSON.stringify({ type: 'history-sync', strokes: strokes.map(normaliseStroke) }));
+    ws.send(JSON.stringify({ type: 'history-sync', pageId: currentPageId, strokes: strokes.map(s => normaliseStroke(s)) }));
   }
 }
 
@@ -557,17 +599,17 @@ function toCanvas(clientX, clientY) {
 }
 
 // Normalise a stroke to 0–1 range for sending over the wire / saving to disk.
-// Coordinates divided by viewport dimensions; size divided by viewport height.
-function normaliseStroke(s) {
-  const w = window.innerWidth, h = window.innerHeight;
+// Accepts explicit dimensions (prepares for split view where panels are half-width).
+function normaliseStroke(s, w, h) {
+  w = w || window.innerWidth; h = h || window.innerHeight;
   const out = { points: s.points.map(p => ({ x: p.x / w, y: p.y / h })), color: s.color, size: s.size / h };
   if (s.text) out.text = s.text;
   return out;
 }
 
 // Denormalise a stroke received from the wire / loaded from disk.
-function denormaliseStroke(s) {
-  const w = window.innerWidth, h = window.innerHeight;
+function denormaliseStroke(s, w, h) {
+  w = w || window.innerWidth; h = h || window.innerHeight;
   const out = { points: s.points.map(p => ({ x: p.x * w, y: p.y * h })), color: s.color, size: s.size * h };
   if (s.text) out.text = s.text;
   return out;
@@ -793,10 +835,17 @@ ws.addEventListener('message', async (e) => {
   }
 
   if (msg.type === 'init') {
-    // Restore strokes from server state (e.g. after a page refresh)
-    strokes = (msg.strokes || []).map(denormaliseStroke);
+    // Restore multi-page state
+    if (msg.pages) wbPages = msg.pages;
+    if (msg.pageOrder) wbPageOrder = msg.pageOrder;
+    if (msg.activePageId) currentPageId = msg.activePageId;
+
+    // Load the active page's strokes
+    const pageData = wbPages[currentPageId];
+    strokes = pageData ? (pageData.strokes || []).map(s => denormaliseStroke(s)) : [];
     redraw();
     resetHistory();
+    updateWbPageNav();
 
     // Restore paused state
     if (msg.paused) {
@@ -805,22 +854,35 @@ ws.addEventListener('message', async (e) => {
       pauseBtn.textContent = 'Paused';
     }
 
-    // Restore PDF display without sending pdf-load back to the server
+    // Restore PDF display if active page is a PDF page
     if (msg.currentPdf && msg.currentPdf.student && msg.currentPdf.filename) {
+      const pdfPageMatch = currentPageId.match(/^pdf_.*_(\d+)$/);
+      const page = pdfPageMatch ? parseInt(pdfPageMatch[1], 10) : (msg.currentPdf.page || 1);
       await restorePdfDisplay(
         msg.currentPdf.student,
         msg.currentPdf.filename,
-        msg.currentPdf.page || 1,
+        page,
         msg.currentPdf.totalPages || 0
       );
     }
+  }
+
+  // --- Multi-page sync from server ---
+  if (msg.type === 'wb-page-add') {
+    if (msg.pageOrder) wbPageOrder = msg.pageOrder;
+    if (!wbPages[msg.pageId]) wbPages[msg.pageId] = { strokes: [], type: msg.pageType || 'blank' };
+  }
+
+  if (msg.type === 'wb-page-change') {
+    // Another teacher instance changed page — follow it
+    navigateToPage(msg.pageId, false);
   }
 });
 
 function sendStroke(stroke) {
   if (ws.readyState === 1) {
     const n = normaliseStroke(stroke);
-    ws.send(JSON.stringify({ type: 'stroke', points: n.points, color: n.color, size: n.size, text: n.text }));
+    ws.send(JSON.stringify({ type: 'stroke', pageId: currentPageId, points: n.points, color: n.color, size: n.size, text: n.text }));
   }
 }
 
@@ -869,6 +931,70 @@ document.addEventListener('keydown', (e) => {
     if (e.shiftKey) performRedo();
     else performUndo();
   }
+});
+
+// --- Whiteboard page navigation ---
+function updateWbPageNav() {
+  const idx = wbPageOrder.indexOf(currentPageId);
+  const total = wbPageOrder.length;
+  document.getElementById('wbPageIndicator').textContent = (idx + 1) + ' / ' + total;
+  document.getElementById('prevWbPage').disabled = idx <= 0;
+  document.getElementById('nextWbPage').disabled = idx >= total - 1;
+}
+
+function navigateToPage(pageId, broadcast = true) {
+  if (pageId === currentPageId) return;
+  // Save current page strokes to the local cache (normalised)
+  wbPages[currentPageId] = { strokes: strokes.map(s => normaliseStroke(s)), type: (wbPages[currentPageId] || {}).type || 'blank' };
+
+  currentPageId = pageId;
+
+  // Load target page strokes
+  const pageData = wbPages[currentPageId];
+  strokes = pageData ? (pageData.strokes || []).map(s => denormaliseStroke(s)) : [];
+  redraw();
+  resetHistory();
+  updateWbPageNav();
+
+  // Handle PDF page rendering
+  const pdfMatch = currentPageId.match(/^pdf_(.+)_(.+)_(\d+)$/);
+  if (pdfMatch && pdfDoc) {
+    pdfPageNum = parseInt(pdfMatch[3], 10);
+    renderPdfPage();
+    pdfCanvas.style.display = 'block';
+  } else if (!pdfMatch) {
+    // Blank page — hide PDF canvas
+    pdfCanvas.style.display = 'none';
+    const dpr = window.devicePixelRatio || 1;
+    pdfCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    pdfCtx.clearRect(0, 0, pdfCanvas.width, pdfCanvas.height);
+  }
+
+  if (broadcast && ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: 'wb-page-change', pageId: currentPageId }));
+  }
+}
+
+document.getElementById('prevWbPage').addEventListener('click', () => {
+  const idx = wbPageOrder.indexOf(currentPageId);
+  if (idx > 0) navigateToPage(wbPageOrder[idx - 1]);
+});
+
+document.getElementById('nextWbPage').addEventListener('click', () => {
+  const idx = wbPageOrder.indexOf(currentPageId);
+  if (idx < wbPageOrder.length - 1) navigateToPage(wbPageOrder[idx + 1]);
+});
+
+document.getElementById('addWbPage').addEventListener('click', () => {
+  const newId = 'wb_' + Date.now();
+  wbPages[newId] = { strokes: [], type: 'blank' };
+  // Insert after current page
+  const idx = wbPageOrder.indexOf(currentPageId);
+  wbPageOrder.splice(idx + 1, 0, newId);
+  if (ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: 'wb-page-add', pageId: newId, afterPageId: currentPageId, pageType: 'blank' }));
+  }
+  navigateToPage(newId);
 });
 
 // --- Build brush controls ---
@@ -1117,6 +1243,13 @@ async function loadPdf(student, filename) {
   pdfTotalPages = pdfDoc.numPages;
   pdfPageNum = 1;
 
+  // Create page entries for each PDF page
+  for (let i = 1; i <= pdfTotalPages; i++) {
+    const pid = `pdf_${student}_${filename}_${i}`;
+    if (!wbPages[pid]) wbPages[pid] = { strokes: [], type: 'pdf', pdfPage: i };
+    if (!wbPageOrder.includes(pid)) wbPageOrder.push(pid);
+  }
+
   // Show PDF UI
   pdfCanvas.style.display = 'block';
   closePdfBtn.style.display = '';
@@ -1132,6 +1265,14 @@ async function loadPdf(student, filename) {
     page: 1,
     totalPages: pdfTotalPages,
   }));
+
+  // Navigate to the first PDF page using the page system
+  const firstPdfPageId = `pdf_${student}_${filename}_1`;
+  currentPageId = firstPdfPageId;
+  strokes = [];
+  redraw();
+  resetHistory();
+  updateWbPageNav();
 
   await renderPdfPage();
   await loadAnnotations();
@@ -1176,21 +1317,16 @@ function updatePageUI() {
   nextPageBtn.disabled = pdfPageNum >= pdfTotalPages;
 }
 
-// --- Page navigation ---
+// --- PDF page navigation (uses the whiteboard page system) ---
 prevPageBtn.addEventListener('click', () => changePage(pdfPageNum - 1));
 nextPageBtn.addEventListener('click', () => changePage(pdfPageNum + 1));
 
 async function changePage(num) {
   if (!pdfDoc || num < 1 || num > pdfTotalPages) return;
-  // Save current page annotations before changing
   await saveAnnotations();
-  pdfPageNum = num;
-  strokes = [];
-  redraw();
-  await renderPdfPage();
-  await loadAnnotations();
-
-  ws.send(JSON.stringify({ type: 'pdf-page', page: pdfPageNum }));
+  const pid = `pdf_${pdfStudent}_${pdfFilename}_${num}`;
+  navigateToPage(pid);
+  ws.send(JSON.stringify({ type: 'pdf-page', page: num }));
 }
 
 // --- Close PDF ---
@@ -1201,8 +1337,6 @@ closePdfBtn.addEventListener('click', async () => {
   pdfFilename = null;
   pdfPageNum = 1;
   pdfTotalPages = 0;
-  strokes = [];
-  redraw();
 
   pdfCanvas.style.display = 'none';
   const dpr = window.devicePixelRatio || 1;
@@ -1214,6 +1348,9 @@ closePdfBtn.addEventListener('click', async () => {
   annoRow.style.display = 'none';
   pdfInfo.textContent = '';
 
+  // Navigate to the first whiteboard page
+  const wbPage = wbPageOrder.find(id => id.startsWith('wb_')) || 'wb_1';
+  navigateToPage(wbPage, false);
   ws.send(JSON.stringify({ type: 'pdf-unload' }));
 });
 
@@ -1222,7 +1359,7 @@ clearAnnoBtn.addEventListener('click', async () => {
   if (!pdfStudent || !pdfFilename) return;
   strokes = [];
   redraw();
-  ws.send(JSON.stringify({ type: 'clear' }));
+  ws.send(JSON.stringify({ type: 'clear', pageId: currentPageId }));
   await fetch(`/api/annotations/${encodeURIComponent(pdfStudent)}/${encodeURIComponent(pdfFilename)}/${pdfPageNum}`, {
     method: 'DELETE',
   });

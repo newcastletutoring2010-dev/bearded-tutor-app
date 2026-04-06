@@ -140,8 +140,17 @@ app.delete('/api/annotations/:student/:pdf/:page', (req, res) => {
   res.json({ ok: true });
 });
 
-// --- Whiteboard State ---
-let strokes = [];
+// --- Multi-Page Whiteboard State ---
+const pages = { wb_1: { strokes: [], type: 'blank' } };
+let pageOrder = ['wb_1'];
+let activePageId = 'wb_1';
+let nextPageNum = 2;
+
+function getPageStrokes(pageId) {
+  if (!pages[pageId]) pages[pageId] = { strokes: [], type: 'blank' };
+  return pages[pageId].strokes;
+}
+
 let revealedImage = '';
 let paused = false;
 
@@ -181,11 +190,11 @@ wss.on('connection', (ws) => {
     switch (msg.type) {
       case 'register':
         ws._role = msg.role;
-        // Send full current state to both students and teachers on connect.
-        // Teachers use it to restore strokes after a page refresh.
         ws.send(JSON.stringify({
           type: 'init',
-          strokes,
+          pages,
+          pageOrder,
+          activePageId,
           revealedImage,
           paused,
           currentPdf,
@@ -193,89 +202,126 @@ wss.on('connection', (ws) => {
         }));
         break;
 
+      // --- Multi-page navigation ---
+      case 'wb-page-add': {
+        const newId = msg.pageId || ('wb_' + nextPageNum++);
+        if (!pages[newId]) pages[newId] = { strokes: [], type: msg.pageType || 'blank' };
+        if (!pageOrder.includes(newId)) {
+          const afterIdx = msg.afterPageId ? pageOrder.indexOf(msg.afterPageId) : pageOrder.length - 1;
+          pageOrder.splice(afterIdx + 1, 0, newId);
+        }
+        activePageId = newId;
+        broadcast({ type: 'wb-page-add', pageId: newId, pageType: msg.pageType || 'blank', pageOrder, activePageId }, 'teacher');
+        break;
+      }
+
+      case 'wb-page-change':
+        activePageId = msg.pageId;
+        broadcast({ type: 'wb-page-change', pageId: msg.pageId }, 'teacher');
+        break;
+
+      // --- Per-page stroke operations (all carry pageId) ---
       case 'stroke': {
+        const pid = msg.pageId || activePageId;
+        const s = getPageStrokes(pid);
         const strokeData = { points: msg.points, color: msg.color, size: msg.size };
         if (msg.text) strokeData.text = msg.text;
-        strokes.push(strokeData);
+        s.push(strokeData);
         if (!paused) {
-          broadcast({ type: 'stroke', ...strokeData }, 'teacher');
+          broadcast({ type: 'stroke', pageId: pid, ...strokeData }, 'teacher');
         }
         break;
       }
 
-      case 'undo':
-        strokes.pop();
+      case 'undo': {
+        const pid = msg.pageId || activePageId;
+        const s = getPageStrokes(pid);
+        s.pop();
         if (!paused) {
-          broadcast({ type: 'full-redraw', strokes }, 'teacher');
+          broadcast({ type: 'full-redraw', pageId: pid, strokes: s }, 'teacher');
         }
         break;
+      }
 
-      case 'clear':
-        strokes = [];
+      case 'clear': {
+        const pid = msg.pageId || activePageId;
+        if (pages[pid]) pages[pid].strokes = [];
         if (!paused) {
-          broadcast({ type: 'clear' }, 'teacher');
+          broadcast({ type: 'clear', pageId: pid }, 'teacher');
         }
         break;
+      }
 
-      case 'erase':
-        strokes = msg.strokes || [];
+      case 'erase': {
+        const pid = msg.pageId || activePageId;
+        if (pages[pid]) pages[pid].strokes = msg.strokes || [];
         if (!paused) {
-          broadcast({ type: 'full-redraw', strokes }, 'teacher');
+          broadcast({ type: 'full-redraw', pageId: pid, strokes: msg.strokes || [] }, 'teacher');
         }
         break;
+      }
 
-      case 'history-sync':
-        strokes = msg.strokes || [];
+      case 'history-sync': {
+        const pid = msg.pageId || activePageId;
+        if (pages[pid]) pages[pid].strokes = msg.strokes || [];
         if (!paused) {
-          broadcast({ type: 'full-redraw', strokes }, 'teacher');
+          broadcast({ type: 'full-redraw', pageId: pid, strokes: msg.strokes || [] }, 'teacher');
         }
         break;
+      }
 
       case 'pause':
         paused = true;
-        if (msg.snapshot) {
-          revealedImage = msg.snapshot;
-        }
+        if (msg.snapshot) revealedImage = msg.snapshot;
         broadcastToAll({ type: 'paused' });
         break;
 
       case 'reveal':
         paused = false;
-        if (msg.snapshot) {
-          revealedImage = msg.snapshot;
-        }
+        if (msg.snapshot) revealedImage = msg.snapshot;
         broadcast({
           type: 'reveal',
-          strokes,
+          pageId: activePageId,
+          strokes: getPageStrokes(activePageId),
           snapshot: msg.snapshot,
         }, 'teacher');
         break;
 
       // --- PDF events ---
-      case 'pdf-load':
+      case 'pdf-load': {
         currentPdf = {
           student: msg.student,
           filename: msg.filename,
           page: msg.page || 1,
           totalPages: msg.totalPages || 0,
         };
-        strokes = [];
+        // Create page entries for each PDF page
+        const pdfPages = [];
+        for (let i = 1; i <= (msg.totalPages || 1); i++) {
+          const pid = `pdf_${msg.student}_${msg.filename}_${i}`;
+          if (!pages[pid]) pages[pid] = { strokes: [], type: 'pdf', pdfPage: i };
+          if (!pageOrder.includes(pid)) pdfPages.push(pid);
+        }
+        if (pdfPages.length > 0) pageOrder.push(...pdfPages);
+        activePageId = `pdf_${msg.student}_${msg.filename}_${msg.page || 1}`;
         broadcast({
           type: 'pdf-load',
           student: msg.student,
           filename: msg.filename,
           page: msg.page || 1,
           totalPages: msg.totalPages || 0,
+          pageOrder,
+          activePageId,
         }, 'teacher');
         break;
+      }
 
       case 'pdf-page':
         currentPdf.page = msg.page;
-        strokes = [];
-        broadcast({
-          type: 'pdf-page',
-          page: msg.page,
-        }, 'teacher');
+        if (currentPdf.student && currentPdf.filename) {
+          activePageId = `pdf_${currentPdf.student}_${currentPdf.filename}_${msg.page}`;
+        }
+        broadcast({ type: 'pdf-page', page: msg.page, activePageId }, 'teacher');
         break;
 
       case 'viewport':
@@ -287,8 +333,9 @@ wss.on('connection', (ws) => {
 
       case 'pdf-unload':
         currentPdf = { student: null, filename: null, page: 1, totalPages: 0 };
-        strokes = [];
-        broadcast({ type: 'pdf-unload' }, 'teacher');
+        // Revert to first whiteboard page
+        activePageId = pageOrder.find(id => id.startsWith('wb_')) || 'wb_1';
+        broadcast({ type: 'pdf-unload', activePageId }, 'teacher');
         break;
 
       // --- Smart calculator via Gemini ---

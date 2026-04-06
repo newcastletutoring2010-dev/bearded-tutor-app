@@ -107,6 +107,10 @@ const pdfStatusEl = document.getElementById('pdfStatus');
 let strokes = [];
 let paused = false;
 
+// --- Multi-page state ---
+let wbPages = {};           // pageId → { strokes (normalised) }
+let displayedPageId = null; // which page is currently rendered
+
 // --- Viewport (mirrors teacher zoom/pan) ---
 const canvasWrap = document.getElementById('canvasWrap');
 
@@ -268,22 +272,29 @@ ws.addEventListener('message', async (e) => {
   switch (msg.type) {
     case 'init':
       paused = msg.paused;
-      strokes = (msg.strokes || []).map(denormaliseStroke);
+
+      // Store full page data
+      if (msg.pages) wbPages = msg.pages;
+      displayedPageId = msg.activePageId || 'wb_1';
+
+      // Load active page strokes
+      const initPage = wbPages[displayedPageId];
+      strokes = initPage ? (initPage.strokes || []).map(denormaliseStroke) : [];
 
       // Apply the teacher's current viewport immediately
       if (msg.currentViewport) {
         applyViewport(msg.currentViewport.zoom, msg.currentViewport.panX, msg.currentViewport.panY);
       }
 
-      // If a PDF is currently loaded, render it first then draw strokes on top
+      // If a PDF is currently loaded, render the correct page
       if (msg.currentPdf && msg.currentPdf.student && msg.currentPdf.filename) {
         await loadPdf(msg.currentPdf.student, msg.currentPdf.filename);
-        pdfPageNum = msg.currentPdf.page || 1;
+        const pdfMatch = displayedPageId.match(/^pdf_.*_(\d+)$/);
+        pdfPageNum = pdfMatch ? parseInt(pdfMatch[1], 10) : (msg.currentPdf.page || 1);
         await renderPdfPage();
         showPdfStatus(msg.currentPdf.student + ' / ' + msg.currentPdf.filename + ' — Page ' + pdfPageNum);
       }
 
-      // If paused, show the frozen snapshot; otherwise draw the live strokes
       if (paused && msg.revealedImage) {
         loadSnapshot(msg.revealedImage);
         showStatus('Paused', 'paused');
@@ -294,6 +305,8 @@ ws.addEventListener('message', async (e) => {
 
     case 'stroke':
       if (paused) return;
+      // Only draw if the stroke is for the currently displayed page
+      if (msg.pageId && msg.pageId !== displayedPageId) return;
       const stroke = denormaliseStroke({ points: msg.points, color: msg.color, size: msg.size, text: msg.text });
       strokes.push(stroke);
       drawStroke(stroke);
@@ -301,12 +314,15 @@ ws.addEventListener('message', async (e) => {
 
     case 'full-redraw':
       if (paused) return;
+      // Only redraw if it's for our displayed page
+      if (msg.pageId && msg.pageId !== displayedPageId) return;
       strokes = (msg.strokes || []).map(denormaliseStroke);
       redraw();
       break;
 
     case 'clear':
       if (paused) return;
+      if (msg.pageId && msg.pageId !== displayedPageId) return;
       strokes = [];
       redraw();
       break;
@@ -327,10 +343,38 @@ ws.addEventListener('message', async (e) => {
       }
       break;
 
+    // --- Multi-page events ---
+    case 'wb-page-add':
+      if (msg.pageOrder) { /* page added, we'll load its strokes on page-change */ }
+      break;
+
+    case 'wb-page-change': {
+      displayedPageId = msg.pageId;
+      // Check if this is a PDF page
+      const pageMatch = msg.pageId.match(/^pdf_(.+)_(.+)_(\d+)$/);
+      if (pageMatch && pdfDoc) {
+        pdfPageNum = parseInt(pageMatch[3], 10);
+        await renderPdfPage();
+        pdfCanvas.style.display = 'block';
+        showPdfStatus('Page ' + pdfPageNum);
+      } else if (!pageMatch) {
+        // Blank whiteboard page — hide PDF
+        pdfCanvas.style.display = 'none';
+        const dpr = window.devicePixelRatio || 1;
+        pdfCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        pdfCtx.clearRect(0, 0, pdfCanvas.width, pdfCanvas.height);
+      }
+      // Load strokes for this page from server cache (will arrive via full-redraw)
+      strokes = [];
+      redraw();
+      break;
+    }
+
     // --- PDF events ---
     case 'pdf-load':
       strokes = [];
       redraw();
+      displayedPageId = msg.activePageId || `pdf_${msg.student}_${msg.filename}_${msg.page || 1}`;
       await loadPdf(msg.student, msg.filename);
       pdfPageNum = msg.page || 1;
       await renderPdfPage();
@@ -340,6 +384,7 @@ ws.addEventListener('message', async (e) => {
     case 'pdf-page':
       strokes = [];
       redraw();
+      displayedPageId = msg.activePageId || displayedPageId;
       pdfPageNum = msg.page;
       if (pdfDoc) {
         await renderPdfPage();
@@ -351,10 +396,10 @@ ws.addEventListener('message', async (e) => {
       strokes = [];
       redraw();
       closePdf();
+      displayedPageId = msg.activePageId || 'wb_1';
       break;
 
     case 'viewport':
-      // Only follow teacher zoom/pan when live — freeze position when paused
       if (!paused) applyViewport(msg.zoom, msg.panX, msg.panY);
       break;
   }
