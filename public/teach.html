@@ -523,7 +523,12 @@
   <div class="pdf-ctrl-row" id="annoRow" style="display:none">
     <button class="pdf-btn danger" id="clearAnnoBtn">Clear Annotations</button>
   </div>
+  <div class="pdf-ctrl-row" id="saveRow" style="display:none">
+    <button class="pdf-btn primary" id="savePdfBtn">Save</button>
+    <button class="pdf-btn" id="exportPdfBtn">Export PDF</button>
+  </div>
 </div>
+<div id="saveMsg" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(39,174,96,0.9);color:#fff;padding:10px 20px;border-radius:10px;font-family:-apple-system,sans-serif;font-size:0.9rem;font-weight:600;z-index:30;pointer-events:none;"></div>
 
 <div id="wbPageNav">
   <button class="wb-nav-btn" id="prevWbPage" disabled>&larr;</button>
@@ -1915,7 +1920,14 @@ async function loadPdf(student, filename) {
   updateWbPageNav();
 
   await renderPdfPage();
-  await loadAnnotations();
+
+  // Try bulk load first (restores all pages), fall back to per-page load
+  const loaded = await bulkLoadAnnotations();
+  if (!loaded) await loadAnnotations();
+
+  // Show save controls and start auto-save
+  saveRow.style.display = '';
+  startAutoSave();
 }
 
 // --- Render PDF page ---
@@ -1971,7 +1983,10 @@ async function changePage(num) {
 
 // --- Close PDF ---
 closePdfBtn.addEventListener('click', async () => {
-  await saveAnnotations();
+  // Bulk save all annotations before closing
+  await bulkSaveAnnotations(true);
+  stopAutoSave();
+
   pdfDoc = null;
   pdfStudent = null;
   pdfFilename = null;
@@ -1986,6 +2001,7 @@ closePdfBtn.addEventListener('click', async () => {
   closePdfBtn.style.display = 'none';
   pageNav.style.display = 'none';
   annoRow.style.display = 'none';
+  saveRow.style.display = 'none';
   pdfInfo.textContent = '';
 
   // Navigate to the first whiteboard page
@@ -2039,6 +2055,205 @@ async function loadAnnotations() {
     console.error('Failed to load annotations:', err);
   }
 }
+
+// =====================================================
+// BULK SAVE / LOAD / EXPORT
+// =====================================================
+const saveMsgEl = document.getElementById('saveMsg');
+const savePdfBtn = document.getElementById('savePdfBtn');
+const exportPdfBtn = document.getElementById('exportPdfBtn');
+const saveRow = document.getElementById('saveRow');
+let autoSaveInterval = null;
+
+function showSaveMsg(text) {
+  saveMsgEl.textContent = text;
+  saveMsgEl.style.display = 'block';
+  saveMsgEl.style.opacity = '1';
+  setTimeout(() => { saveMsgEl.style.opacity = '0'; setTimeout(() => { saveMsgEl.style.display = 'none'; }, 300); }, 2000);
+}
+
+// Collect all page data for the current PDF into one JSON payload
+function collectAllPageData() {
+  // Save current page strokes into wbPages first
+  const panelRect = panels[activePanel].el.getBoundingClientRect();
+  wbPages[currentPageId] = {
+    strokes: strokes.map(s => normaliseStroke(s, panelRect.width, panelRect.height)),
+    type: (wbPages[currentPageId] || {}).type || 'blank',
+  };
+
+  const pdfPrefix = `pdf_${pdfStudent}_${pdfFilename}_`;
+  const allPageData = {};
+  const extraPages = [];
+
+  for (const pid of wbPageOrder) {
+    if (pid.startsWith(pdfPrefix) || (wbPages[pid] && wbPages[pid]._parentPdf === pdfFilename)) {
+      allPageData[pid] = wbPages[pid] || { strokes: [], type: 'blank' };
+    }
+  }
+
+  // Also include any blank pages that were inserted adjacent to PDF pages
+  for (const pid of wbPageOrder) {
+    if (pid.startsWith('wb_') && !allPageData[pid]) {
+      // Check if it's between PDF pages in the order
+      const idx = wbPageOrder.indexOf(pid);
+      const prev = idx > 0 ? wbPageOrder[idx - 1] : '';
+      const next = idx < wbPageOrder.length - 1 ? wbPageOrder[idx + 1] : '';
+      if (prev.startsWith(pdfPrefix) || next.startsWith(pdfPrefix)) {
+        allPageData[pid] = wbPages[pid] || { strokes: [], type: 'blank' };
+        extraPages.push(pid);
+      }
+    }
+  }
+
+  return { pages: allPageData, pageOrder: wbPageOrder.filter(id => allPageData[id]), extraPages };
+}
+
+async function bulkSaveAnnotations(silent = false) {
+  if (!pdfStudent || !pdfFilename) return;
+  try {
+    const data = collectAllPageData();
+    await fetch(`/api/annotations/${encodeURIComponent(pdfStudent)}/${encodeURIComponent(pdfFilename)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+    if (!silent) showSaveMsg('Saved');
+  } catch (err) {
+    console.error('Failed to save annotations:', err);
+    if (!silent) showSaveMsg('Save failed');
+  }
+}
+
+async function bulkLoadAnnotations() {
+  if (!pdfStudent || !pdfFilename) return false;
+  try {
+    const res = await fetch(`/api/annotations/${encodeURIComponent(pdfStudent)}/${encodeURIComponent(pdfFilename)}`);
+    const data = await res.json();
+    if (!data || !data.pages) return false;
+
+    // Restore page data
+    for (const [pid, pageData] of Object.entries(data.pages)) {
+      wbPages[pid] = pageData;
+      if (!wbPageOrder.includes(pid)) wbPageOrder.push(pid);
+    }
+
+    // Load the current page's strokes
+    const panelRect = panels[activePanel].el.getBoundingClientRect();
+    const pageData = wbPages[currentPageId];
+    if (pageData && pageData.strokes) {
+      strokes = pageData.strokes.map(s => denormaliseStroke(s, panelRect.width, panelRect.height));
+      panels[activePanel].strokes = strokes;
+      redraw();
+      resetHistory();
+    }
+
+    showSaveMsg('Annotations loaded');
+    return true;
+  } catch (err) {
+    console.error('Failed to load annotations:', err);
+    return false;
+  }
+}
+
+function startAutoSave() {
+  stopAutoSave();
+  autoSaveInterval = setInterval(() => bulkSaveAnnotations(true), 60000);
+}
+
+function stopAutoSave() {
+  if (autoSaveInterval) { clearInterval(autoSaveInterval); autoSaveInterval = null; }
+}
+
+// Save button
+savePdfBtn.addEventListener('click', () => bulkSaveAnnotations(false));
+
+// Export button
+exportPdfBtn.addEventListener('click', async () => {
+  if (!pdfStudent || !pdfFilename) return;
+  exportPdfBtn.textContent = 'Exporting...';
+  exportPdfBtn.disabled = true;
+
+  try {
+    // Save current state first
+    const panelRect = panels[activePanel].el.getBoundingClientRect();
+    wbPages[currentPageId] = {
+      strokes: strokes.map(s => normaliseStroke(s, panelRect.width, panelRect.height)),
+      type: (wbPages[currentPageId] || {}).type || 'blank',
+    };
+
+    // Render each page to an image
+    const pageImages = [];
+    const pdfPrefix = `pdf_${pdfStudent}_${pdfFilename}_`;
+    const relevantPages = wbPageOrder.filter(pid => pid.startsWith(pdfPrefix) || (wbPages[pid] && wbPages[pid]._parentPdf === pdfFilename));
+
+    for (let i = 0; i < relevantPages.length; i++) {
+      const pid = relevantPages[i];
+      const pd = wbPages[pid];
+      if (!pd || !pd.strokes || pd.strokes.length === 0) {
+        pageImages.push({ pageIndex: i, dataUrl: null });
+        continue;
+      }
+
+      // Render strokes to offscreen canvas
+      const w = 800, h = 1100; // standard export size
+      const off = document.createElement('canvas');
+      off.width = w; off.height = h;
+      const oc = off.getContext('2d');
+
+      for (const s of pd.strokes) {
+        const ds = denormaliseStroke(s, w, h);
+        if (ds.image) {
+          // Skip images for now — they'd need async loading
+          continue;
+        }
+        if (ds.text) {
+          oc.save();
+          oc.font = `bold ${ds.size}px -apple-system, sans-serif`;
+          oc.fillStyle = ds.color || '#000';
+          oc.textBaseline = 'middle';
+          oc.fillText(ds.text, ds.points[0].x, ds.points[0].y);
+          oc.restore();
+          continue;
+        }
+        const pts = ds.points || [];
+        if (pts.length < 2) continue;
+        oc.beginPath();
+        oc.moveTo(pts[0].x, pts[0].y);
+        for (let j = 1; j < pts.length; j++) oc.lineTo(pts[j].x, pts[j].y);
+        oc.strokeStyle = ds.color || '#000';
+        oc.lineWidth = ds.size || 2.5;
+        oc.lineCap = 'round';
+        oc.lineJoin = 'round';
+        oc.stroke();
+      }
+
+      pageImages.push({ pageIndex: i, dataUrl: off.toDataURL('image/png') });
+    }
+
+    const res = await fetch(`/api/export/${encodeURIComponent(pdfStudent)}/${encodeURIComponent(pdfFilename)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pageImages }),
+    });
+
+    if (!res.ok) throw new Error('Export failed');
+
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${pdfStudent}_${pdfFilename.replace('.pdf', '')}_annotated.pdf`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showSaveMsg('Exported');
+  } catch (err) {
+    console.error('Export failed:', err);
+    showSaveMsg('Export failed');
+  }
+
+  exportPdfBtn.textContent = 'Export PDF';
+  exportPdfBtn.disabled = false;
+});
 
 // =====================================================
 // SHAPE RECOGNITION (Draw and Hold)

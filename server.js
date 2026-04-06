@@ -15,7 +15,7 @@ const UPLOADS_DIR = process.env.RAILWAY_ENVIRONMENT
   : path.join(__dirname, 'uploads');
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/uploads', express.static(UPLOADS_DIR));
 
@@ -138,6 +138,74 @@ app.delete('/api/annotations/:student/:pdf/:page', (req, res) => {
   const annoFile = path.join(UPLOADS_DIR, student, `${pdf.replace('.pdf', '')}_annotations_page_${page}.json`);
   if (fs.existsSync(annoFile)) fs.unlinkSync(annoFile);
   res.json({ ok: true });
+});
+
+// --- Bulk annotation save/load (all pages for a PDF) ---
+// Save all page data for a student's PDF
+app.post('/api/annotations/:student/:pdf', (req, res) => {
+  const student = req.params.student.toLowerCase().replace(/[^a-z0-9_-]/g, '');
+  const pdf = req.params.pdf;
+  const dir = path.join(UPLOADS_DIR, student);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  const annoFile = path.join(dir, `${pdf.replace('.pdf', '')}_annotations.json`);
+  fs.writeFileSync(annoFile, JSON.stringify(req.body));
+  res.json({ ok: true });
+});
+
+// Load all page data for a student's PDF
+app.get('/api/annotations/:student/:pdf', (req, res) => {
+  const student = req.params.student.toLowerCase().replace(/[^a-z0-9_-]/g, '');
+  const pdf = req.params.pdf;
+  const annoFile = path.join(UPLOADS_DIR, student, `${pdf.replace('.pdf', '')}_annotations.json`);
+  if (!fs.existsSync(annoFile)) return res.json(null);
+  try {
+    const data = JSON.parse(fs.readFileSync(annoFile, 'utf-8'));
+    res.json(data);
+  } catch {
+    res.json(null);
+  }
+});
+
+// --- PDF Export with annotations ---
+app.post('/api/export/:student/:pdf', async (req, res) => {
+  const { PDFDocument } = require('pdf-lib');
+  const student = req.params.student.toLowerCase().replace(/[^a-z0-9_-]/g, '');
+  const pdf = req.params.pdf;
+  const pdfPath = path.join(UPLOADS_DIR, student, pdf);
+
+  if (!fs.existsSync(pdfPath)) return res.status(404).json({ error: 'PDF not found' });
+
+  try {
+    const existingPdfBytes = fs.readFileSync(pdfPath);
+    const pdfDoc = await PDFDocument.load(existingPdfBytes);
+    const pageImages = req.body.pageImages || []; // [{pageIndex, dataUrl}]
+
+    for (const pi of pageImages) {
+      let page;
+      if (pi.pageIndex < pdfDoc.getPageCount()) {
+        page = pdfDoc.getPage(pi.pageIndex);
+      } else {
+        // Extra blank page added during session
+        page = pdfDoc.addPage();
+      }
+
+      if (pi.dataUrl) {
+        const pngData = pi.dataUrl.replace(/^data:image\/png;base64,/, '');
+        const pngImage = await pdfDoc.embedPng(Buffer.from(pngData, 'base64'));
+        const { width, height } = page.getSize();
+        page.drawImage(pngImage, { x: 0, y: 0, width, height });
+      }
+    }
+
+    const pdfBytes = await pdfDoc.save();
+    const exportName = `${student}_${pdf.replace('.pdf', '')}_annotated.pdf`;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${exportName}"`);
+    res.send(Buffer.from(pdfBytes));
+  } catch (err) {
+    console.error('PDF export error:', err);
+    res.status(500).json({ error: 'Export failed' });
+  }
 });
 
 // --- Multi-Page Whiteboard State ---
